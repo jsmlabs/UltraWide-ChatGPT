@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         UltraWide ChatGPT
 // @namespace    https://www.instagram.com/jsm.ig/
-// @version      2026.08.06.4
+// @version      2026.08.25.1
 // @author       jsmdev
-// @description  Stable, low-overhead ultra-wide layout for the current ChatGPT UI with adaptive width, Canvas safety, settings, SPA support, and conflict cleanup.
+// @description  Robust ultra-wide layout for current ChatGPT Chat and Work with adaptive width, split-view safety, diagnostics, settings, SPA support, and complete cleanup.
 // @license      MIT
 // @match        https://chatgpt.com/*
 // @match        https://www.chatgpt.com/*
@@ -13,15 +13,20 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
+// @grant        GM_unregisterMenuCommand
 // @downloadURL  https://update.greasyfork.org/scripts/557270/UltraWide%20ChatGPT.user.js
 // @updateURL    https://update.greasyfork.org/scripts/557270/UltraWide%20ChatGPT.meta.js
 // ==/UserScript==
 
 /*
   UltraWide ChatGPT
-  Version: 2026.08.06.4
+  Version: 2026.08.25.1
 
   Improvements
+  - Updated for the current ChatGPT Chat + Work web surface
+  - Safer SPA navigation hooks that do not overwrite hooks installed after UltraWide
+  - Better composer selection to avoid widening unrelated editors and dialog inputs
+  - Expanded split-view/artifact detection while preserving legacy Canvas compatibility
   - Atomic marker updates without clearing/scanning the entire page
   - Cleans conflicting styles and attributes from older script versions
   - Avoids body.innerText and broad generated-class selectors
@@ -29,9 +34,14 @@
   - Uses verified conversation turns as structural anchors
   - Lightweight, bounded MutationObserver processing
   - SPA route handling without aggressive polling
-  - Canvas and split-view-safe pane-relative sizing
+  - Chat/Work split-view-safe pane-relative sizing
   - Complete timer, observer, listener, style, and marker cleanup
   - Settings validation and migration from earlier versions
+  - Fixed CSS cache recursion and hardened cache generation
+  - Hot-reload-safe single-instance lifecycle
+  - Storage failure reporting and copyable diagnostics
+  - Live settings status synchronization
+  - Native Navigation API support when available, with safe history fallback
 
   Shortcuts
   - Alt+O  Enable/disable script
@@ -39,12 +49,14 @@
   - Alt+L  Enable/disable left alignment
   - Alt+M  Cycle maximum width
   - Alt+A  Enable/disable adaptive mode
-  - Alt+C  Enable/disable Canvas-safe mode
+  - Alt+C  Enable/disable split-view safe mode
   - Alt+S  Open settings
   - Alt+R  Reset settings
 
   Console API
   - window.__mlUltraWide.state()
+  - window.__mlUltraWide.diagnostics()
+  - window.__mlUltraWide.copyDiagnostics()
   - window.__mlUltraWide.apply()
   - window.__mlUltraWide.scan()
   - window.__mlUltraWide.restart()
@@ -57,31 +69,38 @@
 (() => {
   'use strict';
 
-  const VERSION = '2026.08.06.4';
-  const STORAGE_KEY = 'uwc.settings.v9';
+  const VERSION = '2026.08.25.1';
+  const STORAGE_KEY = 'uwc.settings.v12';
 
   const ID = Object.freeze({
-    style: 'uwc-style-v9',
-    uiStyle: 'uwc-ui-style-v9',
-    toast: 'uwc-toast-v9',
-    modal: 'uwc-settings-v9'
+    style: 'uwc-style-v10',
+    uiStyle: 'uwc-ui-style-v10',
+    toast: 'uwc-toast-v10',
+    modal: 'uwc-settings-v10'
   });
 
   const LEGACY_STYLE_IDS = Object.freeze([
     'uwc-style',
     'uwc-ui-style',
     'uwc-style-v8',
-    'uwc-ui-style-v8'
+    'uwc-ui-style-v8',
+    'uwc-style-v9',
+    'uwc-ui-style-v9'
   ]);
 
   const LEGACY_ELEMENT_IDS = Object.freeze([
     'uwc-toast',
     'uwc-settings-modal',
     'uwc-toast-v8',
-    'uwc-settings-v8'
+    'uwc-settings-v8',
+    'uwc-toast-v9',
+    'uwc-settings-v9'
   ]);
 
   const LEGACY_STORAGE_KEYS = Object.freeze([
+    'uwc.settings.v11',
+    'uwc.settings.v10',
+    'uwc.settings.v9',
     'uwc.settings.v8',
     'uwc.settings.v7',
     'uwc.settings.v6',
@@ -157,7 +176,10 @@
 
     scanDebounceMs: 240,
     repairIntervalMs: 10000,
-    routePollMs: 3000,
+    routePollMs: 10000,
+
+    pauseWhenHidden: true,
+    performanceTelemetry: true,
 
     closeSettingsOnBackdrop: true
   });
@@ -179,6 +201,7 @@
   const CONFIG = Object.freeze({
     maxMutationRecords: 24,
     maxMutationNodes: 10,
+    maxComposerCandidates: 24,
     maxConversationPathDepth: 12,
     maxTurnPathDepth: 6,
     maxComposerPathDepth: 7,
@@ -211,8 +234,9 @@
       '[data-testid="composer:input"]',
       'form[data-type="unified-composer"] textarea',
       'form[data-type="unified-composer"] [contenteditable="true"]',
-      'main textarea',
-      'main [contenteditable="true"][role="textbox"]'
+      'form[data-type="unified-composer"] [role="textbox"]',
+      'main form textarea',
+      'main form [contenteditable="true"][role="textbox"]'
     ].join(','),
 
     composerShell: [
@@ -222,13 +246,30 @@
       'form[data-type="unified-composer"]'
     ].join(','),
 
-    canvasIndicators: [
+    excludedComposerAncestor: [
+      '#uwc-settings-v10',
+      '[role="dialog"]',
+      '[aria-modal="true"]',
+      '[data-testid="artifact"]',
+      '[data-testid^="artifact-"]',
+      '[data-testid="code-editor"]',
+      '[data-testid^="code-editor-"]',
+      '.monaco-editor',
+      '.cm-editor',
+      '.CodeMirror'
+    ].join(','),
+
+    splitViewIndicators: [
       '[data-testid="canvas"]',
       '[data-testid^="canvas-"]',
       '[data-testid="artifact"]',
       '[data-testid^="artifact-"]',
       '[data-testid="code-editor"]',
       '[data-testid^="code-editor-"]',
+      '[data-testid="document-editor"]',
+      '[data-testid^="document-editor-"]',
+      '[data-testid="spreadsheet-editor"]',
+      '[data-testid^="spreadsheet-editor-"]',
       '.monaco-editor',
       '.cm-editor',
       '.CodeMirror'
@@ -268,14 +309,28 @@
 
     originalPushState: null,
     originalReplaceState: null,
+    wrappedPushState: null,
+    wrappedReplaceState: null,
 
     menusRegistered: false,
+    menuCommandIds: new Map(),
     modalSyncing: false,
+    modalReturnFocus: null,
 
     canvasDetected: false,
     lastTurnCount: 0,
     lastScanAt: 0,
+    lastScanDurationMs: 0,
+    scanCount: 0,
+    mutationBatchCount: 0,
+    deferredScan: false,
+    cssCacheKey: '',
+    mainCssCache: '',
+    uiCssCache: '',
     lastError: null,
+    lastSavedAt: 0,
+    storageAvailable: true,
+    instanceStartedAt: 0,
 
     marked: new Map(
       MANAGED_MARKERS.map((attribute) => [
@@ -309,6 +364,73 @@
     return isElement(value) && value.isConnected;
   }
 
+  function setAttributeValue(element, name, value) {
+    if (!element || element.getAttribute(name) === value) {
+      return false;
+    }
+
+    element.setAttribute(name, value);
+    return true;
+  }
+
+  function setBooleanAttribute(element, name, enabled) {
+    if (!element) {
+      return false;
+    }
+
+    if (enabled) {
+      return setAttributeValue(element, name, '1');
+    }
+
+    if (element.hasAttribute(name)) {
+      element.removeAttribute(name);
+      return true;
+    }
+
+    return false;
+  }
+
+  function shouldPauseWork() {
+    return Boolean(
+      settings.pauseWhenHidden &&
+      document.hidden
+    );
+  }
+
+  function nowMs() {
+    return typeof performance?.now === 'function'
+      ? performance.now()
+      : Date.now();
+  }
+
+  function hasConnectedMarker(attribute) {
+    const elements = runtime.marked.get(attribute);
+
+    if (!elements || elements.size === 0) {
+      return false;
+    }
+
+    for (const element of elements) {
+      if (element?.isConnected) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  function hasDisconnectedMarkers() {
+    for (const elements of runtime.marked.values()) {
+      for (const element of elements) {
+        if (!element?.isConnected) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
   function hasGmStorage() {
     return (
       typeof GM_getValue === 'function' &&
@@ -335,14 +457,22 @@
     try {
       if (hasGmStorage()) {
         GM_setValue(key, value);
+        runtime.storageAvailable = true;
+        runtime.lastSavedAt = Date.now();
         return true;
       }
     } catch (_) {}
 
     try {
       localStorage.setItem(key, JSON.stringify(value));
+      runtime.storageAvailable = true;
+      runtime.lastSavedAt = Date.now();
       return true;
-    } catch (_) {
+    } catch (error) {
+      runtime.storageAvailable = false;
+      runtime.lastError = `Settings storage failed: ${
+        error?.message || error
+      }`;
       return false;
     }
   }
@@ -483,6 +613,16 @@
       input.routePollMs,
       ...LIMITS.routePollMs,
       output.routePollMs
+    );
+
+    output.pauseWhenHidden = normalizeBoolean(
+      input.pauseWhenHidden,
+      output.pauseWhenHidden
+    );
+
+    output.performanceTelemetry = normalizeBoolean(
+      input.performanceTelemetry,
+      output.performanceTelemetry
     );
 
     output.closeSettingsOnBackdrop = normalizeBoolean(
@@ -630,7 +770,7 @@
     try {
       runtime.canvasDetected = Boolean(
         document.querySelector(
-          SELECTOR.canvasIndicators
+          SELECTOR.splitViewIndicators
         )
       );
     } catch (_) {
@@ -986,6 +1126,37 @@ ${safeMediaCss}
   gap:8px!important;
 }
 
+
+#${ID.modal} .uwc-status{
+  display:flex!important;
+  flex-wrap:wrap!important;
+  gap:5px!important;
+  margin:0 0 16px!important;
+  padding:11px 13px!important;
+  border:1px solid color-mix(in srgb,CanvasText 12%,transparent)!important;
+  border-radius:12px!important;
+  background:color-mix(in srgb,CanvasText 5%,Canvas)!important;
+  font-size:12px!important;
+}
+
+#${ID.modal} .uwc-status span{
+  opacity:.68!important;
+}
+
+#${ID.modal} .uwc-shortcuts{
+  display:grid!important;
+  grid-template-columns:repeat(4,minmax(0,1fr))!important;
+  gap:8px!important;
+}
+
+#${ID.modal} .uwc-shortcuts span{
+  padding:7px 9px!important;
+  border:1px solid color-mix(in srgb,CanvasText 10%,transparent)!important;
+  border-radius:9px!important;
+  background:color-mix(in srgb,CanvasText 4%,Canvas)!important;
+  font:12px/1.3 ui-monospace,SFMono-Regular,Consolas,monospace!important;
+}
+
 @media (max-width:700px){
   #${ID.modal}{
     align-items:stretch!important;
@@ -999,6 +1170,10 @@ ${safeMediaCss}
   #${ID.modal} .uwc-grid{
     grid-template-columns:1fr!important;
   }
+
+  #${ID.modal} .uwc-shortcuts{
+    grid-template-columns:repeat(2,minmax(0,1fr))!important;
+  }
 }
 
 @media (prefers-reduced-motion:reduce){
@@ -1010,6 +1185,44 @@ ${safeMediaCss}
     animation:none!important;
   }
 }`.trim();
+  }
+
+  function getCssCacheKey() {
+    return [
+      VERSION,
+      settings.cap,
+      settings.gutterMin,
+      settings.gutterVw,
+      settings.gutterMax,
+      settings.safeMedia
+    ].join('|');
+  }
+
+  function getMainCss() {
+    const key = getCssCacheKey();
+
+    if (
+      runtime.cssCacheKey !== key ||
+      !runtime.mainCssCache
+    ) {
+      runtime.cssCacheKey = key;
+      runtime.mainCssCache = buildMainCss();
+    }
+
+    return runtime.mainCssCache;
+  }
+
+  function getUiCss() {
+    if (!runtime.uiCssCache) {
+      runtime.uiCssCache = buildUiCss();
+    }
+
+    return runtime.uiCssCache;
+  }
+
+  function invalidateCssCache() {
+    runtime.cssCacheKey = '';
+    runtime.mainCssCache = '';
   }
 
   function ensureStyle(id, content) {
@@ -1052,66 +1265,44 @@ ${safeMediaCss}
       return;
     }
 
-    root.setAttribute(
+    setAttributeValue(
+      root,
       ATTR.version,
       VERSION
     );
 
-    root.setAttribute(
+    setAttributeValue(
+      root,
       ATTR.cap,
       settings.cap
     );
 
-    if (settings.enabled) {
-      root.setAttribute(
-        ATTR.enabled,
-        '1'
-      );
-    } else {
-      root.removeAttribute(
-        ATTR.enabled
-      );
-    }
+    setBooleanAttribute(
+      root,
+      ATTR.enabled,
+      settings.enabled
+    );
 
-    if (isWideActive()) {
-      root.setAttribute(
-        ATTR.wide,
-        '1'
-      );
-    } else {
-      root.removeAttribute(
-        ATTR.wide
-      );
-    }
+    setBooleanAttribute(
+      root,
+      ATTR.wide,
+      isWideActive()
+    );
 
-    if (
+    setBooleanAttribute(
+      root,
+      ATTR.left,
       settings.enabled &&
-      settings.left
-    ) {
-      root.setAttribute(
-        ATTR.left,
-        '1'
-      );
-    } else {
-      root.removeAttribute(
-        ATTR.left
-      );
-    }
+        settings.left
+    );
 
-    if (
+    setBooleanAttribute(
+      root,
+      ATTR.canvas,
       settings.enabled &&
-      settings.canvasSafeMode &&
-      runtime.canvasDetected
-    ) {
-      root.setAttribute(
-        ATTR.canvas,
-        '1'
-      );
-    } else {
-      root.removeAttribute(
-        ATTR.canvas
-      );
-    }
+        settings.canvasSafeMode &&
+        runtime.canvasDetected
+    );
   }
 
   function clearRootState() {
@@ -1516,41 +1707,102 @@ ${safeMediaCss}
         document.querySelectorAll(
           SELECTOR.composerInput
         )
-      ).filter(isConnectedElement);
+      )
+        .filter(isConnectedElement)
+        .slice(-CONFIG.maxComposerCandidates);
     } catch (_) {}
 
     if (candidates.length === 0) {
       return null;
     }
 
+    const isExcluded = (element) => {
+      try {
+        return Boolean(
+          element.closest(
+            SELECTOR.excludedComposerAncestor
+          )
+        );
+      } catch (_) {
+        return false;
+      }
+    };
+
+    const isVisible = (element) => {
+      try {
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style.display !== 'none' &&
+          style.visibility !== 'hidden'
+        );
+      } catch (_) {
+        return true;
+      }
+    };
+
     const focused =
       document.activeElement;
 
     if (
       isElement(focused) &&
-      candidates.includes(focused)
+      candidates.includes(focused) &&
+      !isExcluded(focused) &&
+      isVisible(focused)
     ) {
       return focused;
     }
 
-    const visible =
-      candidates.filter((element) => {
+    const scored = candidates
+      .filter((element) =>
+        !isExcluded(element) &&
+        isVisible(element)
+      )
+      .map((element, index) => {
+        let score = index;
+
         try {
-          return (
-            element.getClientRects()
-              .length > 0
-          );
-        } catch (_) {
-          return true;
-        }
-      });
+          if (
+            element.matches(
+              '[data-testid="composer-input"],[data-testid="composer:input"]'
+            )
+          ) {
+            score += 1000;
+          }
 
-    const pool =
-      visible.length > 0
-        ? visible
-        : candidates;
+          if (
+            element.closest(
+              'form[data-type="unified-composer"]'
+            )
+          ) {
+            score += 500;
+          }
 
-    return pool[pool.length - 1] || null;
+          const rect =
+            element.getBoundingClientRect();
+
+          score += Math.max(
+            0,
+            Math.min(
+              window.innerHeight || 0,
+              rect.bottom
+            )
+          ) / 10;
+        } catch (_) {}
+
+        return {
+          element,
+          score
+        };
+      })
+      .sort((a, b) =>
+        b.score - a.score
+      );
+
+    return scored[0]?.element || null;
   }
 
   function markComposer(desired) {
@@ -1633,14 +1885,19 @@ ${safeMediaCss}
   }
 
   function performScan() {
-    runtime.lastScanAt =
-      Date.now();
+    if (shouldPauseWork()) {
+      runtime.deferredScan = true;
+      return;
+    }
 
+    const startedAt = nowMs();
+
+    runtime.lastScanAt = Date.now();
     runtime.lastError = null;
+    runtime.deferredScan = false;
 
     try {
-      const desired =
-        createDesiredMarkers();
+      const desired = createDesiredMarkers();
 
       detectCanvas();
       markConversation(desired);
@@ -1648,17 +1905,21 @@ ${safeMediaCss}
 
       applyMarkerDiff(desired);
       setRootState();
+      runtime.scanCount += 1;
     } catch (error) {
-      runtime.lastError =
-        String(
-          error?.message ||
-          error
-        );
+      runtime.lastError = String(
+        error?.message || error
+      );
 
       console.error(
         '[UltraWide] Layout scan failed:',
         error
       );
+    } finally {
+      if (settings.performanceTelemetry) {
+        runtime.lastScanDurationMs =
+          Math.max(0, nowMs() - startedAt);
+      }
     }
   }
 
@@ -1697,6 +1958,11 @@ ${safeMediaCss}
       !runtime.started &&
       !force
     ) {
+      return;
+    }
+
+    if (shouldPauseWork()) {
+      runtime.deferredScan = true;
       return;
     }
 
@@ -1755,7 +2021,7 @@ ${safeMediaCss}
   function applyStyles() {
     ensureStyle(
       ID.uiStyle,
-      buildUiCss()
+      getUiCss()
     );
 
     if (!settings.enabled) {
@@ -1767,7 +2033,7 @@ ${safeMediaCss}
 
     ensureStyle(
       ID.style,
-      buildMainCss()
+      getMainCss()
     );
 
     setRootState();
@@ -1781,7 +2047,7 @@ ${safeMediaCss}
 
     ensureStyle(
       ID.uiStyle,
-      buildUiCss()
+      getUiCss()
     );
 
     const parent =
@@ -1850,7 +2116,7 @@ ${safeMediaCss}
       `turns ${
         runtime.lastTurnCount
       }`,
-      `canvas ${
+      `split ${
         runtime.canvasDetected
           ? 'yes'
           : 'no'
@@ -1878,6 +2144,10 @@ ${safeMediaCss}
 
     runtime.repairTimer =
       window.setInterval(() => {
+        if (shouldPauseWork()) {
+          return;
+        }
+
         try {
           repair();
         } catch (error) {
@@ -1896,7 +2166,9 @@ ${safeMediaCss}
 
     runtime.routeTimer =
       window.setInterval(() => {
-        checkRoute();
+        if (!shouldPauseWork()) {
+          checkRoute();
+        }
       }, settings.routePollMs);
   }
 
@@ -1904,7 +2176,8 @@ ${safeMediaCss}
     message,
     restartRuntimeTimers = false
   ) {
-    saveSettings();
+    const saved = saveSettings();
+    invalidateCssCache();
     applyStyles();
     syncSettingsModal();
 
@@ -1912,9 +2185,14 @@ ${safeMediaCss}
       restartTimers();
     }
 
+    if (runtime.started) {
+      refreshMenus();
+    }
+
     showToast(
-      message ||
-      getStatusText()
+      saved
+        ? (message || getStatusText())
+        : 'UltraWide updated, but settings could not be saved'
     );
   }
 
@@ -2052,20 +2330,26 @@ ${safeMediaCss}
         history.pushState ===
         runtime.originalPushState
       ) {
-        history.pushState =
+        runtime.wrappedPushState =
           wrapHistoryMethod(
             runtime.originalPushState
           );
+
+        history.pushState =
+          runtime.wrappedPushState;
       }
 
       if (
         history.replaceState ===
         runtime.originalReplaceState
       ) {
-        history.replaceState =
+        runtime.wrappedReplaceState =
           wrapHistoryMethod(
             runtime.originalReplaceState
           );
+
+        history.replaceState =
+          runtime.wrappedReplaceState;
       }
     } catch (_) {}
   }
@@ -2073,19 +2357,28 @@ ${safeMediaCss}
   function restoreHistoryHooks() {
     try {
       if (
-        runtime.originalPushState
+        runtime.originalPushState &&
+        runtime.wrappedPushState &&
+        history.pushState ===
+          runtime.wrappedPushState
       ) {
         history.pushState =
           runtime.originalPushState;
       }
 
       if (
-        runtime.originalReplaceState
+        runtime.originalReplaceState &&
+        runtime.wrappedReplaceState &&
+        history.replaceState ===
+          runtime.wrappedReplaceState
       ) {
         history.replaceState =
           runtime.originalReplaceState;
       }
     } catch (_) {}
+
+    runtime.wrappedPushState = null;
+    runtime.wrappedReplaceState = null;
   }
 
   function nodeMayRequireScan(node) {
@@ -2114,7 +2407,7 @@ ${safeMediaCss}
           SELECTOR.composerInput
         ) ||
         node.matches(
-          SELECTOR.canvasIndicators
+          SELECTOR.splitViewIndicators
         )
       ) {
         return true;
@@ -2126,7 +2419,7 @@ ${safeMediaCss}
             SELECTOR.preferredTurns,
             SELECTOR.fallbackMessages,
             SELECTOR.composerInput,
-            SELECTOR.canvasIndicators
+            SELECTOR.splitViewIndicators
           ].join(',')
         )
       );
@@ -2136,50 +2429,55 @@ ${safeMediaCss}
   }
 
   function mutationNeedsScan(records) {
-    const limitedRecords =
-      Array.from(
-        records || []
-      ).slice(
-        0,
-        CONFIG.maxMutationRecords
+    if (!records || records.length === 0) {
+      return false;
+    }
+
+    const recordLimit = Math.min(
+      records.length,
+      CONFIG.maxMutationRecords
+    );
+
+    for (let recordIndex = 0; recordIndex < recordLimit; recordIndex += 1) {
+      const record = records[recordIndex];
+      const added = record.addedNodes;
+      const removed = record.removedNodes;
+      const addedLimit = Math.min(
+        added?.length || 0,
+        CONFIG.maxMutationNodes
+      );
+      const removedLimit = Math.min(
+        removed?.length || 0,
+        CONFIG.maxMutationNodes
       );
 
-    for (const record of limitedRecords) {
-      const added =
-        Array.from(
-          record.addedNodes || []
-        ).slice(
-          0,
-          CONFIG.maxMutationNodes
-        );
-
-      const removed =
-        Array.from(
-          record.removedNodes || []
-        ).slice(
-          0,
-          CONFIG.maxMutationNodes
-        );
-
-      for (const node of [
-        ...added,
-        ...removed
-      ]) {
-        if (
-          nodeMayRequireScan(node)
-        ) {
+      for (let index = 0; index < addedLimit; index += 1) {
+        if (nodeMayRequireScan(added[index])) {
           return true;
         }
       }
+
+      for (let index = 0; index < removedLimit; index += 1) {
+        if (nodeMayRequireScan(removed[index])) {
+          return true;
+        }
+      }
+
+      if (
+        (added?.length || 0) > CONFIG.maxMutationNodes ||
+        (removed?.length || 0) > CONFIG.maxMutationNodes
+      ) {
+        return true;
+      }
     }
 
-    return false;
+    return records.length > CONFIG.maxMutationRecords;
   }
 
   function onBodyMutations(records) {
-    if (
-      mutationNeedsScan(records)
-    ) {
+    runtime.mutationBatchCount += 1;
+
+    if (mutationNeedsScan(records)) {
       scheduleScan(false);
     }
   }
@@ -2192,7 +2490,7 @@ ${safeMediaCss}
     ) {
       ensureStyle(
         ID.uiStyle,
-        buildUiCss()
+        getUiCss()
       );
     }
 
@@ -2204,7 +2502,7 @@ ${safeMediaCss}
     ) {
       ensureStyle(
         ID.style,
-        buildMainCss()
+        getMainCss()
       );
 
       scheduleScan(true);
@@ -2336,59 +2634,37 @@ ${safeMediaCss}
       return;
     }
 
-    if (
-      !document.getElementById(
-        ID.style
-      )
-    ) {
-      ensureStyle(
-        ID.style,
-        buildMainCss()
-      );
+    if (!document.getElementById(ID.style)) {
+      ensureStyle(ID.style, getMainCss());
     }
 
-    if (
-      !document.getElementById(
-        ID.uiStyle
-      )
-    ) {
-      ensureStyle(
-        ID.uiStyle,
-        buildUiCss()
-      );
+    if (!document.getElementById(ID.uiStyle)) {
+      ensureStyle(ID.uiStyle, getUiCss());
     }
 
     checkRoute();
 
-    const actualTurns =
-      queryConversationTurns().length;
+    if (shouldPauseWork()) {
+      runtime.deferredScan = true;
+      return;
+    }
 
-    const markedTurns =
-      runtime.marked
-        .get(ATTR.turn)
-        ?.size || 0;
+    const conversationMissing =
+      runtime.lastTurnCount > 0 &&
+      !hasConnectedMarker(ATTR.turn);
 
-    const composerRequired =
-      settings.widenComposer;
-
-    const composerFound =
-      (
-        runtime.marked
-          .get(ATTR.composer)
-          ?.size || 0
-      ) > 0;
+    const composerMissing =
+      settings.widenComposer &&
+      !hasConnectedMarker(ATTR.composer);
 
     if (
-      actualTurns !== markedTurns ||
-      (
-        composerRequired &&
-        !composerFound
-      )
+      hasDisconnectedMarkers() ||
+      conversationMissing ||
+      composerMissing
     ) {
       scheduleScan(false);
     }
 
-    detectCanvas();
     setRootState();
   }
 
@@ -2520,7 +2796,7 @@ ${safeMediaCss}
         !settings.canvasSafeMode;
 
       commit(
-        `Canvas-safe mode: ${
+        `Split-view safe mode: ${
           settings.canvasSafeMode
             ? 'on'
             : 'off'
@@ -2543,7 +2819,6 @@ ${safeMediaCss}
   }
 
   function onEnvironmentChange() {
-    detectCanvas();
     setRootState();
     scheduleScan(false);
   }
@@ -2612,11 +2887,40 @@ ${safeMediaCss}
       }
     );
 
+    window.addEventListener(
+      'hashchange',
+      scheduleRouteCheck,
+      {
+        passive: true,
+        signal
+      }
+    );
+
+    try {
+      if (
+        window.navigation &&
+        typeof window.navigation.addEventListener ===
+          'function'
+      ) {
+        window.navigation.addEventListener(
+          'navigate',
+          scheduleRouteCheck,
+          {
+            signal
+          }
+        );
+      }
+    } catch (_) {}
+
     document.addEventListener(
       'visibilitychange',
       () => {
         if (!document.hidden) {
-          onEnvironmentChange();
+          if (runtime.deferredScan) {
+            scheduleScan(true);
+          } else {
+            onEnvironmentChange();
+          }
         }
       },
       {
@@ -2634,21 +2938,91 @@ ${safeMediaCss}
       null;
   }
 
+  function unregisterMenus() {
+    for (const commandId of runtime.menuCommandIds.values()) {
+      try {
+        if (
+          commandId !== undefined &&
+          commandId !== null &&
+          typeof GM_unregisterMenuCommand ===
+            'function'
+        ) {
+          GM_unregisterMenuCommand(commandId);
+        }
+      } catch (_) {}
+    }
+
+    runtime.menuCommandIds.clear();
+    runtime.menusRegistered = false;
+  }
+
   function registerMenu(
+    key,
     label,
-    callback
+    callback,
+    accessKey
   ) {
     try {
       if (
-        typeof GM_registerMenuCommand ===
+        typeof GM_registerMenuCommand !==
         'function'
       ) {
+        return null;
+      }
+
+      const commandId =
         GM_registerMenuCommand(
           label,
-          callback
+          callback,
+          accessKey
         );
-      }
-    } catch (_) {}
+
+      runtime.menuCommandIds.set(
+        key,
+        commandId
+      );
+
+      return commandId;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function menuStateLabel(
+    icon,
+    label,
+    active,
+    detail = ''
+  ) {
+    const state =
+      active ? 'ON' : 'OFF';
+
+    return `${icon} ${label}: ${state}${
+      detail ? ` · ${detail}` : ''
+    }`;
+  }
+
+  function toggleSetting(
+    key,
+    label,
+    options = {}
+  ) {
+    settings[key] =
+      !settings[key];
+
+    commit(
+      `${label}: ${
+        settings[key]
+          ? 'on'
+          : 'off'
+      }`,
+      Boolean(options.restartTimers)
+    );
+  }
+
+  function refreshMenus() {
+    unregisterMenus();
+    registerMenus();
   }
 
   function registerMenus() {
@@ -2659,98 +3033,210 @@ ${safeMediaCss}
     runtime.menusRegistered = true;
 
     registerMenu(
-      '⚙️ UltraWide settings',
-      openSettings
+      'settings',
+      `⚙️ Open UltraWide settings · v${VERSION}`,
+      openSettings,
+      's'
     );
 
     registerMenu(
-      '🖥️ Toggle UltraWide',
+      'enabled',
+      menuStateLabel(
+        '⏻',
+        'Script',
+        settings.enabled
+      ),
       () => {
-        settings.wide =
-          !settings.wide;
+        toggleSetting(
+          'enabled',
+          'UltraWide script'
+        );
+      },
+      'o'
+    );
 
-        commit(
-          `UltraWide: ${
-            settings.wide
-              ? 'on'
-              : 'off'
-          }`
+    registerMenu(
+      'wide',
+      menuStateLabel(
+        '↔',
+        'UltraWide',
+        settings.wide,
+        isWideActive()
+          ? 'active'
+          : 'inactive'
+      ),
+      () => {
+        toggleSetting(
+          'wide',
+          'UltraWide mode'
+        );
+      },
+      'u'
+    );
+
+    registerMenu(
+      'left',
+      menuStateLabel(
+        '⇤',
+        'Left alignment',
+        settings.left
+      ),
+      () => {
+        toggleSetting(
+          'left',
+          'Left alignment'
+        );
+      },
+      'l'
+    );
+
+    registerMenu(
+      'cap',
+      `📏 Width cap: ${
+        settings.cap === 'none'
+          ? 'No limit'
+          : `${settings.cap}px`
+      } · cycle`,
+      cycleCap,
+      'm'
+    );
+
+    registerMenu(
+      'auto',
+      menuStateLabel(
+        '⚡',
+        'Adaptive mode',
+        settings.auto,
+        `${settings.autoMinWidth}px minimum`
+      ),
+      () => {
+        toggleSetting(
+          'auto',
+          'Adaptive mode'
+        );
+      },
+      'a'
+    );
+
+    registerMenu(
+      'composer',
+      menuStateLabel(
+        '✍',
+        'Wide composer',
+        settings.widenComposer
+      ),
+      () => {
+        toggleSetting(
+          'widenComposer',
+          'Wide composer'
         );
       }
     );
 
     registerMenu(
-      '🟢 Enable/disable script',
+      'canvas',
+      menuStateLabel(
+        '▣',
+        'Split-view safe mode',
+        settings.canvasSafeMode,
+        runtime.canvasDetected
+          ? 'Canvas detected'
+          : 'no Canvas'
+      ),
       () => {
-        settings.enabled =
-          !settings.enabled;
+        toggleSetting(
+          'canvasSafeMode',
+          'Split-view safe mode'
+        );
+      },
+      'c'
+    );
 
-        commit(
-          `Script: ${
-            settings.enabled
-              ? 'on'
-              : 'off'
-          }`
+    registerMenu(
+      'media',
+      menuStateLabel(
+        '▧',
+        'Safe media',
+        settings.safeMedia
+      ),
+      () => {
+        toggleSetting(
+          'safeMedia',
+          'Safe media constraints'
         );
       }
     );
 
     registerMenu(
-      '📏 Cycle width cap',
-      cycleCap
-    );
-
-    registerMenu(
-      '⚡ Toggle adaptive mode',
+      'pause-hidden',
+      menuStateLabel(
+        '⏸',
+        'Pause in hidden tabs',
+        settings.pauseWhenHidden,
+        runtime.deferredScan
+          ? 'scan deferred'
+          : 'idle'
+      ),
       () => {
-        settings.auto =
-          !settings.auto;
-
-        commit(
-          `Adaptive mode: ${
-            settings.auto
-              ? 'on'
-              : 'off'
-          }`
+        toggleSetting(
+          'pauseWhenHidden',
+          'Pause in hidden tabs'
         );
       }
     );
 
     registerMenu(
-      '🎨 Toggle Canvas-safe mode',
+      'telemetry',
+      menuStateLabel(
+        '◷',
+        'Performance telemetry',
+        settings.performanceTelemetry,
+        `${runtime.lastScanDurationMs.toFixed(1)} ms last scan`
+      ),
       () => {
-        settings.canvasSafeMode =
-          !settings.canvasSafeMode;
-
-        commit(
-          `Canvas-safe mode: ${
-            settings.canvasSafeMode
-              ? 'on'
-              : 'off'
-          }`
+        toggleSetting(
+          'performanceTelemetry',
+          'Performance telemetry'
         );
       }
     );
 
     registerMenu(
-      '↔️ Toggle left alignment',
+      'scan',
+      `🔄 Force layout scan · ${runtime.lastTurnCount} turns`,
       () => {
-        settings.left =
-          !settings.left;
-
-        commit(
-          `Left alignment: ${
-            settings.left
-              ? 'on'
-              : 'off'
-          }`
+        scheduleScan(true);
+        showToast(
+          'UltraWide layout rescanned'
+        );
+        window.setTimeout(
+          refreshMenus,
+          0
         );
       }
     );
 
     registerMenu(
-      '♻️ Reset settings',
-      resetSettings
+      'diagnostics',
+      '🩺 Copy diagnostics',
+      () => {
+        void copyDiagnostics();
+      }
+    );
+
+    registerMenu(
+      'reset',
+      '♻ Reset all settings',
+      () => {
+        if (
+          window.confirm(
+            'Reset every UltraWide setting to its default value?'
+          )
+        ) {
+          resetSettings();
+        }
+      },
+      'r'
     );
   }
 
@@ -3092,6 +3578,28 @@ ${safeMediaCss}
             String(settings[key]);
         }
       }
+
+      const statusTitle =
+        modal.querySelector(
+          '[data-role="status-title"]'
+        );
+
+      const statusDetail =
+        modal.querySelector(
+          '[data-role="status-detail"]'
+        );
+
+      if (statusTitle) {
+        statusTitle.textContent =
+          isWideActive()
+            ? 'UltraWide is active'
+            : 'UltraWide is inactive';
+      }
+
+      if (statusDetail) {
+        statusDetail.textContent =
+          ` ${getStatusText()}`;
+      }
     } finally {
       runtime.modalSyncing = false;
     }
@@ -3099,12 +3607,57 @@ ${safeMediaCss}
 
   function closeSettings() {
     removeById(ID.modal);
+
+    const returnFocus =
+      runtime.modalReturnFocus;
+
+    runtime.modalReturnFocus = null;
+
+    if (
+      isConnectedElement(returnFocus) &&
+      typeof returnFocus.focus ===
+        'function'
+    ) {
+      returnFocus.focus({
+        preventScroll: true
+      });
+    }
+  }
+
+  function getFocusableElements(container) {
+    if (!isConnectedElement(container)) {
+      return [];
+    }
+
+    return Array.from(
+      container.querySelectorAll(
+        [
+          'button:not([disabled])',
+          'input:not([disabled])',
+          'select:not([disabled])',
+          'textarea:not([disabled])',
+          'a[href]',
+          '[tabindex]:not([tabindex="-1"])'
+        ].join(',')
+      )
+    ).filter((element) => {
+      try {
+        return (
+          element.getClientRects().length > 0 &&
+          element.getAttribute(
+            'aria-hidden'
+          ) !== 'true'
+        );
+      } catch (_) {
+        return true;
+      }
+    });
   }
 
   function openSettings() {
     ensureStyle(
       ID.uiStyle,
-      buildUiCss()
+      getUiCss()
     );
 
     const existing =
@@ -3121,6 +3674,11 @@ ${safeMediaCss}
 
       return;
     }
+
+    runtime.modalReturnFocus =
+      isElement(document.activeElement)
+        ? document.activeElement
+        : null;
 
     const modal =
       createElement(
@@ -3168,7 +3726,7 @@ ${safeMediaCss}
                           className:
                             'uwc-subtitle',
                           text:
-                            `Version ${VERSION} · Stable adaptive layout`
+                            `Version ${VERSION} · Chat + Work adaptive layout`
                         }
                       )
                     ]
@@ -3197,6 +3755,41 @@ ${safeMediaCss}
                     'uwc-body'
                 },
                 [
+                  createElement(
+                    'div',
+                    {
+                      className:
+                        'uwc-status',
+                      role: 'status',
+                      'aria-live':
+                        'polite'
+                    },
+                    [
+                      createElement(
+                        'strong',
+                        {
+                          dataset: {
+                            role: 'status-title'
+                          },
+                          text:
+                            isWideActive()
+                              ? 'UltraWide is active'
+                              : 'UltraWide is inactive'
+                        }
+                      ),
+                      createElement(
+                        'span',
+                        {
+                          dataset: {
+                            role: 'status-detail'
+                          },
+                          text:
+                            ` ${getStatusText()}`
+                        }
+                      )
+                    ]
+                  ),
+
                   createSection(
                     'UltraWide',
                     [
@@ -3230,7 +3823,7 @@ ${safeMediaCss}
                           ),
                           createCheckbox(
                             'canvasSafeMode',
-                            'Canvas and split-view safe mode'
+                            'Chat/Work split-view safe mode'
                           ),
                           createCheckbox(
                             'toast',
@@ -3325,15 +3918,94 @@ ${safeMediaCss}
                           ),
                           createNumberInput(
                             'routePollMs',
-                            'Route fallback interval'
+                            'SPA route fallback interval'
                           ),
                           createNumberInput(
                             'toastMs',
                             'Status-message duration'
                           ),
                           createCheckbox(
+                            'pauseWhenHidden',
+                            'Pause background work in hidden tabs'
+                          ),
+                          createCheckbox(
+                            'performanceTelemetry',
+                            'Collect lightweight scan timing'
+                          ),
+                          createCheckbox(
                             'closeSettingsOnBackdrop',
                             'Close settings on backdrop'
+                          )
+                        ]
+                      )
+                    ]
+                  ),
+
+                  createSection(
+                    'Keyboard shortcuts',
+                    [
+                      createElement(
+                        'div',
+                        {
+                          className:
+                            'uwc-shortcuts'
+                        },
+                        [
+                          createElement(
+                            'span',
+                            {
+                              text:
+                                'Alt+O Script'
+                            }
+                          ),
+                          createElement(
+                            'span',
+                            {
+                              text:
+                                'Alt+U UltraWide'
+                            }
+                          ),
+                          createElement(
+                            'span',
+                            {
+                              text:
+                                'Alt+L Align'
+                            }
+                          ),
+                          createElement(
+                            'span',
+                            {
+                              text:
+                                'Alt+M Width'
+                            }
+                          ),
+                          createElement(
+                            'span',
+                            {
+                              text:
+                                'Alt+A Adaptive'
+                            }
+                          ),
+                          createElement(
+                            'span',
+                            {
+                              text:
+                                'Alt+C Canvas'
+                            }
+                          ),
+                          createElement(
+                            'span',
+                            {
+                              text:
+                                'Alt+S Settings'
+                            }
+                          ),
+                          createElement(
+                            'span',
+                            {
+                              text:
+                                'Alt+R Reset'
+                            }
                           )
                         ]
                       )
@@ -3366,11 +4038,29 @@ ${safeMediaCss}
                         'button',
                         {
                           type: 'button',
+                          text:
+                            'Copy diagnostics',
+                          onclick: () => {
+                            void copyDiagnostics();
+                          }
+                        }
+                      ),
+                      createElement(
+                        'button',
+                        {
+                          type: 'button',
                           className:
                             'uwc-danger',
                           text: 'Reset',
-                          onclick:
-                            resetSettings
+                          onclick: () => {
+                            if (
+                              window.confirm(
+                                'Reset every UltraWide setting to its default value?'
+                              )
+                            ) {
+                              resetSettings();
+                            }
+                          }
                         }
                       ),
                       createElement(
@@ -3414,6 +4104,42 @@ ${safeMediaCss}
           event.preventDefault();
           event.stopPropagation();
           closeSettings();
+          return;
+        }
+
+        if (event.key === 'Tab') {
+          const focusable =
+            getFocusableElements(modal);
+
+          if (focusable.length === 0) {
+            event.preventDefault();
+            modal.focus({
+              preventScroll: true
+            });
+            return;
+          }
+
+          const first =
+            focusable[0];
+
+          const last =
+            focusable[
+              focusable.length - 1
+            ];
+
+          if (
+            event.shiftKey &&
+            document.activeElement === first
+          ) {
+            event.preventDefault();
+            last.focus();
+          } else if (
+            !event.shiftKey &&
+            document.activeElement === last
+          ) {
+            event.preventDefault();
+            first.focus();
+          }
         }
       }
     );
@@ -3428,9 +4154,74 @@ ${safeMediaCss}
 
     parent.appendChild(modal);
 
-    modal.focus({
+    const firstFocusable =
+      getFocusableElements(modal)[0];
+
+    (
+      firstFocusable ||
+      modal
+    ).focus({
       preventScroll: true
     });
+  }
+
+  function getDiagnostics() {
+    const state = getState();
+
+    return {
+      generatedAt: new Date().toISOString(),
+      userAgent: navigator.userAgent,
+      viewport: {
+        width: window.innerWidth || 0,
+        height: window.innerHeight || 0,
+        devicePixelRatio:
+          window.devicePixelRatio || 1
+      },
+      document: {
+        hidden: document.hidden,
+        readyState: document.readyState,
+        url: location.href
+      },
+      state
+    };
+  }
+
+  async function copyDiagnostics() {
+    const output = JSON.stringify(
+      getDiagnostics(),
+      null,
+      2
+    );
+
+    try {
+      await navigator.clipboard.writeText(output);
+      showToast('UltraWide diagnostics copied');
+      return true;
+    } catch (_) {}
+
+    try {
+      const textarea = document.createElement('textarea');
+      textarea.value = output;
+      textarea.readOnly = true;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      textarea.style.pointerEvents = 'none';
+
+      (getBody() || getRoot())?.appendChild(textarea);
+      textarea.select();
+
+      const copied = document.execCommand('copy');
+      textarea.remove();
+
+      if (copied) {
+        showToast('UltraWide diagnostics copied');
+        return true;
+      }
+    } catch (_) {}
+
+    console.info('[UltraWide] Diagnostics:', getDiagnostics());
+    showToast('Copy failed; diagnostics written to console');
+    return false;
   }
 
   function getState() {
@@ -3473,8 +4264,26 @@ ${safeMediaCss}
         runtime.lastTurnCount,
       lastScanAt:
         runtime.lastScanAt,
+      lastScanDurationMs:
+        runtime.lastScanDurationMs,
+      scanCount:
+        runtime.scanCount,
+      mutationBatchCount:
+        runtime.mutationBatchCount,
+      deferredScan:
+        runtime.deferredScan,
+      pauseWhenHidden:
+        settings.pauseWhenHidden,
+      performanceTelemetry:
+        settings.performanceTelemetry,
       lastError:
         runtime.lastError,
+      storageAvailable:
+        runtime.storageAvailable,
+      lastSavedAt:
+        runtime.lastSavedAt,
+      instanceStartedAt:
+        runtime.instanceStartedAt,
 
       markedTurns:
         runtime.marked
@@ -3525,6 +4334,7 @@ ${safeMediaCss}
     loadSettings();
 
     runtime.started = true;
+    runtime.instanceStartedAt = Date.now();
     runtime.href = location.href;
 
     installHistoryHooks();
@@ -3535,7 +4345,7 @@ ${safeMediaCss}
 
     ensureStyle(
       ID.uiStyle,
-      buildUiCss()
+      getUiCss()
     );
 
     applyStyles();
@@ -3582,6 +4392,7 @@ ${safeMediaCss}
     unbindEvents();
     disconnectObservers();
     restoreHistoryHooks();
+    unregisterMenus();
 
     clearManagedMarkers();
     clearRootState();
@@ -3599,6 +4410,19 @@ ${safeMediaCss}
 
   function installApi() {
     try {
+      const previous =
+        window.__mlUltraWide;
+
+      if (
+        previous &&
+        previous.version !== VERSION &&
+        typeof previous.stop === 'function'
+      ) {
+        try {
+          previous.stop();
+        } catch (_) {}
+      }
+
       Object.defineProperty(
         window,
         '__mlUltraWide',
@@ -3619,6 +4443,8 @@ ${safeMediaCss}
             set: setOptions,
             reset: resetSettings,
             state: getState,
+            diagnostics: getDiagnostics,
+            copyDiagnostics,
 
             caps: () => [
               ...CAPS
