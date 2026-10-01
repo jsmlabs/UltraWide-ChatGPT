@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UltraWide ChatGPT
 // @namespace    https://www.instagram.com/jsm.ig/
-// @version      2026.08.25.1
+// @version      2026.10.01.12
 // @author       jsmdev
 // @description  Robust ultra-wide layout for current ChatGPT Chat and Work with adaptive width, split-view safety, diagnostics, settings, SPA support, and complete cleanup.
 // @license      MIT
@@ -14,13 +14,13 @@
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
 // @grant        GM_unregisterMenuCommand
-// @downloadURL  https://update.greasyfork.org/scripts/557270/UltraWide%20ChatGPT.user.js
-// @updateURL    https://update.greasyfork.org/scripts/557270/UltraWide%20ChatGPT.meta.js
+// @downloadURL https://update.greasyfork.org/scripts/557270/UltraWide%20ChatGPT.user.js
+// @updateURL https://update.greasyfork.org/scripts/557270/UltraWide%20ChatGPT.meta.js
 // ==/UserScript==
 
 /*
   UltraWide ChatGPT
-  Version: 2026.08.25.1
+  Version: 2026.10.01.12
 
   Improvements
   - Updated for the current ChatGPT Chat + Work web surface
@@ -42,6 +42,36 @@
   - Storage failure reporting and copyable diagnostics
   - Live settings status synchronization
   - Native Navigation API support when available, with safe history fallback
+  - Same-version reinjection now cleanly stops the previous runtime
+  - Attribute-aware DOM observation catches structural selector changes earlier
+  - Split-view detection ignores hidden editor/artifact remnants
+  - Repair verifies style contents, not only style element presence
+  - Extended scan diagnostics with measured average/max duration and route/mutation timestamps
+  - Clear ON/OFF state pills for every settings toggle, with redundant text + color cues
+  - Free-plan/upgrade notices now participate in UltraWide width handling when detected outside conversation turns
+  - October 2026 architecture refresh based on the live virtualized transcript DOM
+  - Primary width control now overrides ChatGPT thread CSS variables instead of relying on individual turn wrappers
+  - Supports data-thread-user-message-navigation-content transcript roots and data-thread-find-target conversation roots
+  - Supports virtualized data-turn-key/data-content-search-turn-key turns and current assistant/user message markers
+  - Composer width now follows the same thread variable chain through #thread-bottom-container and #prompt-textarea
+  - Core width remains stable across React virtualization, remounts, scrolling, and SPA navigation
+  - Accepts presence-only data-thread-user-message-navigation-content roots instead of requiring the literal value "true"
+  - Promotes data-content-search-turn-key to a primary virtualized-turn selector
+  - Adds a semantic main-level thread-variable fallback so width survives wrapper/class churn
+  - Deduplicates nested virtualized turn markers so one logical turn is never counted or widened twice
+  - Prioritizes the live #prompt-textarea/#thread-bottom-container composer path during candidate scoring
+  - Makes free-plan notice detection choose the smallest relevant visible container instead of broad ancestors
+  - Reduces avoidable notice scanning by preferring semantic status/note containers before generic div fallbacks
+  - Adds structural-root mutation triggers so transcript/composer remounts are repaired earlier
+  - Adds runtime integrity verification to diagnostics and the public console API
+  - Removes duplicate mutation observer attributes and centralizes reusable scan selectors
+  - Settings modal reloads the page on close when saved settings changed
+  - Adaptive mode now uses the effective live chat-pane width instead of only the browser viewport
+  - Adds a lifecycle-safe ResizeObserver for sidebar, split-view, and pane-size changes
+  - Adds explicit DOM capability detection with strategy classification and compatibility health
+  - Diagnostics now report pane geometry, selector health, compatibility issues, and observer state
+  - Pane observation automatically follows React/SPA remounts and falls back safely when unavailable
+  - Redesigns the userscript-manager menu with compact, consistent status labels and clearer runtime details
 
   Shortcuts
   - Alt+O  Enable/disable script
@@ -56,6 +86,8 @@
   Console API
   - window.__mlUltraWide.state()
   - window.__mlUltraWide.diagnostics()
+  - window.__mlUltraWide.capabilities()
+  - window.__mlUltraWide.verify()
   - window.__mlUltraWide.copyDiagnostics()
   - window.__mlUltraWide.apply()
   - window.__mlUltraWide.scan()
@@ -69,14 +101,14 @@
 (() => {
   'use strict';
 
-  const VERSION = '2026.08.25.1';
+  const VERSION = '2026.10.01.12';
   const STORAGE_KEY = 'uwc.settings.v12';
 
   const ID = Object.freeze({
-    style: 'uwc-style-v10',
-    uiStyle: 'uwc-ui-style-v10',
-    toast: 'uwc-toast-v10',
-    modal: 'uwc-settings-v10'
+    style: 'uwc-style-v11',
+    uiStyle: 'uwc-ui-style-v11',
+    toast: 'uwc-toast-v11',
+    modal: 'uwc-settings-v11'
   });
 
   const LEGACY_STYLE_IDS = Object.freeze([
@@ -85,7 +117,9 @@
     'uwc-style-v8',
     'uwc-ui-style-v8',
     'uwc-style-v9',
-    'uwc-ui-style-v9'
+    'uwc-ui-style-v9',
+    'uwc-style-v10',
+    'uwc-ui-style-v10'
   ]);
 
   const LEGACY_ELEMENT_IDS = Object.freeze([
@@ -94,7 +128,9 @@
     'uwc-toast-v8',
     'uwc-settings-v8',
     'uwc-toast-v9',
-    'uwc-settings-v9'
+    'uwc-settings-v9',
+    'uwc-toast-v10',
+    'uwc-settings-v10'
   ]);
 
   const LEGACY_STORAGE_KEYS = Object.freeze([
@@ -125,7 +161,10 @@
     turnPath: 'data-uwc-turn-path',
 
     composer: 'data-uwc-composer',
-    composerPath: 'data-uwc-composer-path'
+    composerPath: 'data-uwc-composer-path',
+
+    planNotice: 'data-uwc-plan-notice',
+    planNoticePath: 'data-uwc-plan-notice-path'
   });
 
   const MANAGED_MARKERS = Object.freeze([
@@ -134,7 +173,9 @@
     ATTR.turn,
     ATTR.turnPath,
     ATTR.composer,
-    ATTR.composerPath
+    ATTR.composerPath,
+    ATTR.planNotice,
+    ATTR.planNoticePath
   ]);
 
   const CAPS = Object.freeze([
@@ -202,15 +243,35 @@
     maxMutationRecords: 24,
     maxMutationNodes: 10,
     maxComposerCandidates: 24,
+    maxPlanNoticeCandidates: 900,
     maxConversationPathDepth: 12,
     maxTurnPathDepth: 6,
     maxComposerPathDepth: 7,
+    maxPlanNoticePathDepth: 7,
     routeDelayMs: 100,
-    idleTimeoutMs: 700
+    idleTimeoutMs: 700,
+    debugEventLimit: 50,
+    invariantFailureThreshold: 3,
+    reloadLoopWindowMs: 10000,
+    reloadLoopMaxCount: 2,
+    mutationAttributeFilter: Object.freeze([
+      'data-testid',
+      'data-turn-key',
+      'data-content-search-turn-key',
+      'data-thread-user-message-navigation-content',
+      'data-message-author-role',
+      'role',
+      'contenteditable',
+      'aria-modal',
+      'aria-hidden',
+      'hidden'
+    ])
   });
 
   const SELECTOR = Object.freeze({
     preferredTurns: [
+      '[data-turn-key]',
+      '[data-content-search-turn-key]',
       '[data-testid="conversation-turn"]',
       '[data-testid^="conversation-turn-"]',
       'article[data-testid="conversation-turn"]',
@@ -219,17 +280,26 @@
 
     fallbackMessages: [
       '[data-message-author-role]',
-      '[data-message-id][data-message-author-role]'
+      '[data-message-id][data-message-author-role]',
+      '[data-markdown-text-style="assistant-message"]',
+      '[data-user-message-bubble="true"]',
+      '[data-conversation-role="assistant"]'
     ].join(','),
 
     main: [
       'main',
       '[role="main"]',
+      '[data-thread-user-message-navigation-content]',
+      '[data-thread-find-target="conversation"]',
       '[data-testid="main-app"]',
-      '[data-testid="chat-layout"]'
+      '[data-testid="chat-layout"]',
+      '[data-testid="conversation"]',
+      '[data-testid="thread"]'
     ].join(','),
 
     composerInput: [
+      '#prompt-textarea',
+      '[data-testid="prompt-textarea"]',
       '[data-testid="composer-input"]',
       '[data-testid="composer:input"]',
       'form[data-type="unified-composer"] textarea',
@@ -240,6 +310,8 @@
     ].join(','),
 
     composerShell: [
+      '#thread-bottom-container',
+      '#thread-bottom',
       '[data-testid="composer"]',
       '[data-testid="composer-shell"]',
       '[data-testid="composer-container"]',
@@ -247,6 +319,7 @@
     ].join(','),
 
     excludedComposerAncestor: [
+      '#uwc-settings-v11',
       '#uwc-settings-v10',
       '[role="dialog"]',
       '[aria-modal="true"]',
@@ -270,17 +343,58 @@
       '[data-testid^="document-editor-"]',
       '[data-testid="spreadsheet-editor"]',
       '[data-testid^="spreadsheet-editor-"]',
+      '[data-testid*="artifact-panel"]',
+      '[data-testid*="work-panel"]',
       '.monaco-editor',
       '.cm-editor',
       '.CodeMirror'
     ].join(','),
 
+    structuralRoots: [
+      '[data-thread-user-message-navigation-content]',
+      '[data-thread-find-target="conversation"]',
+      '#thread-bottom-container',
+      '#prompt-textarea'
+    ].join(','),
+
     turnContent: [
+      '[data-markdown-text-style="assistant-message"]',
+      '[data-user-message-bubble="true"]',
       '.markdown',
       '[class*="prose"]',
       '[data-message-author-role]'
     ].join(',')
   });
+
+  const MANAGED_LAYOUT_SELECTOR = MANAGED_MARKERS
+    .map((attribute) => `[${attribute}]`)
+    .join(',');
+
+  const SCAN_TRIGGER_SELECTOR = [
+    SELECTOR.preferredTurns,
+    SELECTOR.fallbackMessages,
+    SELECTOR.composerInput,
+    SELECTOR.splitViewIndicators,
+    SELECTOR.structuralRoots
+  ].join(',');
+
+  const DIRTY = Object.freeze({
+    conversation: 'conversation',
+    composer: 'composer',
+    notice: 'notice',
+    split: 'split',
+    root: 'root'
+  });
+
+  const ALL_DIRTY_REGIONS = Object.freeze([
+    DIRTY.conversation,
+    DIRTY.composer,
+    DIRTY.notice,
+    DIRTY.split,
+    DIRTY.root
+  ]);
+
+  const RELOAD_GUARD_KEY = 'uwc.reload.guard.v1';
 
   const settings = {
     ...DEFAULTS
@@ -293,9 +407,11 @@
     bodyObserver: null,
     headObserver: null,
     bootstrapObserver: null,
+    paneResizeObserver: null,
 
     observedBody: null,
     observedHead: null,
+    observedPane: null,
 
     eventController: null,
 
@@ -316,14 +432,40 @@
     menuCommandIds: new Map(),
     modalSyncing: false,
     modalReturnFocus: null,
+    modalSettingsSnapshot: '',
 
     canvasDetected: false,
+    effectivePaneWidth: 0,
+    effectivePaneHeight: 0,
+    lastPaneResizeAt: 0,
+    paneResizeCount: 0,
+    lastCapabilities: null,
+    lastCompatibility: null,
     lastTurnCount: 0,
+    lastRawTurnCount: 0,
+    lastPlanNoticeCandidateCount: 0,
     lastScanAt: 0,
     lastScanDurationMs: 0,
+    totalScanDurationMs: 0,
+    maxScanDurationMs: 0,
+    measuredScanCount: 0,
     scanCount: 0,
     mutationBatchCount: 0,
+    lastMutationAt: 0,
+    lastRouteChangeAt: 0,
     deferredScan: false,
+    pendingRepairReasons: new Set(),
+    pendingDirtyRegions: new Set(),
+    repairRequestCount: 0,
+    repairPassCount: 0,
+    coalescedRepairCount: 0,
+    lastRepairAt: 0,
+    lastRepairReasons: [],
+    invariantFailureStreak: 0,
+    lastInvariants: null,
+    safeFallbackActive: false,
+    safeFallbackReason: '',
+    debugEvents: [],
     cssCacheKey: '',
     mainCssCache: '',
     uiCssCache: '',
@@ -362,6 +504,26 @@
 
   function isConnectedElement(value) {
     return isElement(value) && value.isConnected;
+  }
+
+  function isVisibleElement(element) {
+    if (!isConnectedElement(element)) {
+      return false;
+    }
+
+    try {
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+
+      return (
+        rect.width > 0 &&
+        rect.height > 0 &&
+        style.display !== 'none' &&
+        style.visibility !== 'hidden'
+      );
+    } catch (_) {
+      return true;
+    }
   }
 
   function setAttributeValue(element, name, value) {
@@ -706,7 +868,9 @@
       'data-uwc-turn',
       'data-uwc-turn-path',
       'data-uwc-composer',
-      'data-uwc-composer-path'
+      'data-uwc-composer-path',
+      'data-uwc-plan-notice',
+      'data-uwc-plan-notice-path'
     ];
 
     for (const attribute of oldManagedAttributes) {
@@ -735,6 +899,123 @@
     }
   }
 
+  function getVisibleRect(element) {
+    if (!isConnectedElement(element)) {
+      return null;
+    }
+
+    try {
+      const rect = element.getBoundingClientRect();
+
+      if (
+        rect.width <= 0 ||
+        rect.height <= 0
+      ) {
+        return null;
+      }
+
+      return rect;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function resolveActivePane() {
+    const selectors = [
+      '[data-thread-user-message-navigation-content]',
+      '[data-thread-find-target="conversation"]',
+      '#thread-bottom-container',
+      '#prompt-textarea'
+    ];
+
+    for (const selector of selectors) {
+      let anchor = null;
+
+      try {
+        anchor = Array.from(
+          document.querySelectorAll(selector)
+        ).find(isVisibleElement) || null;
+      } catch (_) {}
+
+      if (!anchor) {
+        continue;
+      }
+
+      const main =
+        nearestMain(anchor) ||
+        anchor.closest?.('main,[role="main"]') ||
+        null;
+
+      if (getVisibleRect(main)) {
+        return main;
+      }
+
+      let current = anchor;
+
+      for (let depth = 0; current && depth < 8; depth += 1) {
+        const rect = getVisibleRect(current);
+
+        if (
+          rect &&
+          rect.width >= 320 &&
+          rect.height >= 200
+        ) {
+          return current;
+        }
+
+        current = current.parentElement;
+      }
+    }
+
+    try {
+      return Array.from(
+        document.querySelectorAll(
+          'main,[role="main"]'
+        )
+      ).find(isVisibleElement) || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function measureEffectivePane() {
+    const pane =
+      runtime.observedPane?.isConnected
+        ? runtime.observedPane
+        : resolveActivePane();
+
+    const rect = getVisibleRect(pane);
+
+    const width = rect
+      ? Math.round(rect.width)
+      : Math.max(0, Math.round(window.innerWidth || 0));
+
+    const height = rect
+      ? Math.round(rect.height)
+      : Math.max(0, Math.round(window.innerHeight || 0));
+
+    runtime.effectivePaneWidth = width;
+    runtime.effectivePaneHeight = height;
+
+    return {
+      element: pane || null,
+      width,
+      height,
+      source: rect ? 'pane' : 'viewport'
+    };
+  }
+
+  function getAdaptiveWidth() {
+    const measured =
+      runtime.effectivePaneWidth > 0
+        ? runtime.effectivePaneWidth
+        : measureEffectivePane().width;
+
+    return measured > 0
+      ? measured
+      : (window.innerWidth || 0);
+  }
+
   function isWideActive() {
     if (!settings.enabled || !settings.wide) {
       return false;
@@ -761,18 +1042,255 @@
     }
 
     return (
-      (window.innerWidth || 0) >=
+      getAdaptiveWidth() >=
       settings.autoMinWidth
     );
   }
 
+  function detectDomCapabilities() {
+    const queryOne = (selector) => {
+      try {
+        return Boolean(
+          document.querySelector(selector)
+        );
+      } catch (_) {
+        return false;
+      }
+    };
+
+    const queryCount = (selector) => {
+      try {
+        return document.querySelectorAll(
+          selector
+        ).length;
+      } catch (_) {
+        return 0;
+      }
+    };
+
+    const virtualizedTurnCount =
+      queryCount(
+        '[data-turn-key],[data-content-search-turn-key]'
+      );
+
+    const fallbackTurnCount =
+      queryCount(SELECTOR.fallbackMessages);
+
+    const capabilities = {
+      transcriptRoot:
+        queryOne(
+          '[data-thread-user-message-navigation-content]'
+        ),
+      conversationTarget:
+        queryOne(
+          '[data-thread-find-target="conversation"]'
+        ),
+      threadBottomContainer:
+        queryOne('#thread-bottom-container'),
+      promptTextarea:
+        queryOne(
+          '#prompt-textarea,[data-testid="prompt-textarea"]'
+        ),
+      virtualizedTurns:
+        virtualizedTurnCount > 0,
+      virtualizedTurnCount,
+      fallbackTurns:
+        fallbackTurnCount > 0,
+      fallbackTurnCount,
+      threadVariableWrappers:
+        queryOne(
+          '[class*="thread-content-max-width"],[class*="thread-body-max-width"]'
+        ),
+      splitView:
+        runtime.canvasDetected,
+      resizeObserver:
+        typeof ResizeObserver === 'function'
+    };
+
+    let strategy = 'unknown';
+
+    if (
+      capabilities.transcriptRoot &&
+      capabilities.virtualizedTurns
+    ) {
+      strategy = 'virtualized-thread';
+    } else if (
+      capabilities.conversationTarget &&
+      (
+        capabilities.virtualizedTurns ||
+        capabilities.fallbackTurns
+      )
+    ) {
+      strategy = 'conversation-target';
+    } else if (
+      capabilities.virtualizedTurns ||
+      capabilities.fallbackTurns
+    ) {
+      strategy = 'turn-markers';
+    }
+
+    capabilities.strategy = strategy;
+    runtime.lastCapabilities = capabilities;
+
+    return capabilities;
+  }
+
+  function evaluateCompatibility(
+    capabilities = detectDomCapabilities()
+  ) {
+    const issues = [];
+    let score = 100;
+
+    if (
+      !capabilities.transcriptRoot &&
+      !capabilities.conversationTarget
+    ) {
+      score -= 35;
+      issues.push(
+        'No current transcript/conversation root detected'
+      );
+    }
+
+    if (
+      !capabilities.virtualizedTurns &&
+      !capabilities.fallbackTurns
+    ) {
+      score -= 35;
+      issues.push('No conversation turns detected');
+    }
+
+    if (
+      settings.widenComposer &&
+      !capabilities.promptTextarea &&
+      !capabilities.threadBottomContainer
+    ) {
+      score -= 20;
+      issues.push('Composer root/input not detected');
+    }
+
+    if (
+      capabilities.strategy === 'unknown'
+    ) {
+      score -= 10;
+      issues.push('No supported layout strategy resolved');
+    }
+
+    score = Math.max(0, score);
+
+    const status =
+      score >= 90
+        ? 'healthy'
+        : score >= 60
+          ? 'degraded'
+          : 'unsupported';
+
+    const result = {
+      status,
+      score,
+      strategy: capabilities.strategy,
+      issues
+    };
+
+    runtime.lastCompatibility = result;
+    return result;
+  }
+
+  function onPaneResize(entries) {
+    const entry = entries?.[0];
+
+    if (!entry) {
+      return;
+    }
+
+    const rect =
+      entry.contentRect ||
+      getVisibleRect(runtime.observedPane);
+
+    if (!rect) {
+      return;
+    }
+
+    const width =
+      Math.max(0, Math.round(rect.width));
+
+    const height =
+      Math.max(0, Math.round(rect.height));
+
+    const changed =
+      width !== runtime.effectivePaneWidth ||
+      height !== runtime.effectivePaneHeight;
+
+    runtime.effectivePaneWidth = width;
+    runtime.effectivePaneHeight = height;
+    runtime.lastPaneResizeAt = Date.now();
+    runtime.paneResizeCount += 1;
+
+    if (!changed || !runtime.started) {
+      return;
+    }
+
+    setRootState();
+    syncSettingsModal();
+    requestRepair(
+      'pane-resize',
+      [DIRTY.split, DIRTY.root]
+    );
+  }
+
+  function attachPaneResizeObserver() {
+    const pane = resolveActivePane();
+
+    if (
+      pane === runtime.observedPane &&
+      runtime.paneResizeObserver
+    ) {
+      measureEffectivePane();
+      return true;
+    }
+
+    runtime.paneResizeObserver?.disconnect();
+    runtime.paneResizeObserver = null;
+    runtime.observedPane = null;
+
+    if (!pane) {
+      measureEffectivePane();
+      return false;
+    }
+
+    runtime.observedPane = pane;
+    measureEffectivePane();
+
+    if (typeof ResizeObserver !== 'function') {
+      return false;
+    }
+
+    try {
+      runtime.paneResizeObserver =
+        new ResizeObserver(onPaneResize);
+
+      runtime.paneResizeObserver.observe(pane);
+      return true;
+    } catch (_) {
+      runtime.paneResizeObserver = null;
+      return false;
+    }
+  }
+
+  function disconnectPaneResizeObserver() {
+    runtime.paneResizeObserver?.disconnect();
+    runtime.paneResizeObserver = null;
+    runtime.observedPane = null;
+    runtime.effectivePaneWidth = 0;
+    runtime.effectivePaneHeight = 0;
+  }
+
   function detectCanvas() {
     try {
-      runtime.canvasDetected = Boolean(
-        document.querySelector(
+      runtime.canvasDetected = Array.from(
+        document.querySelectorAll(
           SELECTOR.splitViewIndicators
         )
-      );
+      ).some(isVisibleElement);
     } catch (_) {
       runtime.canvasDetected = false;
     }
@@ -853,6 +1371,108 @@
   }
 }
 
+/*
+ * Current ChatGPT (October 2026) owns the effective reading width at the
+ * virtualized transcript root. The stable variable chain is:
+ *
+ *   --thread-content-responsive-max-width
+ *     -> --thread-content-max-width
+ *     -> --thread-body-max-width
+ *     -> max-w-(--thread-body-max-width)
+ *
+ * Override that chain directly. This is the primary UltraWide mechanism;
+ * per-turn markers below are now supplemental for alignment/media handling.
+ */
+
+/* Semantic fallback: current ChatGPT width utilities inherit these variables.
+   Applying them at main keeps sizing pane-relative and resilient when React
+   changes intermediate wrappers or utility-class names. */
+:root[${ATTR.enabled}="1"][${ATTR.wide}="1"] main{
+  --thread-content-responsive-max-width:var(--uwc-content-width)!important;
+  --thread-content-max-width:var(--uwc-content-width)!important;
+  --thread-body-max-width:calc(
+    var(--thread-content-max-width) +
+    (var(--thread-body-inline-padding,0px) * 2)
+  )!important;
+}
+
+:root[${ATTR.enabled}="1"][${ATTR.wide}="1"]
+[data-thread-user-message-navigation-content]{
+  --thread-content-responsive-max-width:var(--uwc-content-width)!important;
+  --thread-content-max-width:var(--uwc-content-width)!important;
+  --thread-body-max-width:calc(
+    var(--thread-content-max-width) +
+    (var(--thread-body-inline-padding,0px) * 2)
+  )!important;
+  width:100%!important;
+  max-width:var(--thread-body-max-width)!important;
+  min-width:0!important;
+  margin-inline:auto!important;
+  box-sizing:border-box!important;
+}
+
+/* Conversation content inherits the transcript variables even when React
+   virtualizes and remounts individual turns. */
+:root[${ATTR.enabled}="1"][${ATTR.wide}="1"]
+[data-thread-find-target="conversation"]{
+  --thread-content-responsive-max-width:var(--uwc-content-width)!important;
+  --thread-content-max-width:var(--uwc-content-width)!important;
+  --thread-body-max-width:calc(
+    var(--thread-content-max-width) +
+    (var(--thread-body-inline-padding,0px) * 2)
+  )!important;
+  width:100%!important;
+  max-width:none!important;
+  min-width:0!important;
+}
+
+/* Any current width wrapper that redefines the same variables is normalized
+   back to the UltraWide width. Variable names are stable semantic anchors and
+   avoid dependency on generated hash classes. */
+:root[${ATTR.enabled}="1"][${ATTR.wide}="1"]
+[data-thread-user-message-navigation-content] [class*="thread-content-max-width"],
+:root[${ATTR.enabled}="1"][${ATTR.wide}="1"]
+[data-thread-user-message-navigation-content] [class*="thread-body-max-width"]{
+  --thread-content-responsive-max-width:var(--uwc-content-width)!important;
+  --thread-content-max-width:var(--uwc-content-width)!important;
+  --thread-body-max-width:calc(
+    var(--thread-content-max-width) +
+    (var(--thread-body-inline-padding,0px) * 2)
+  )!important;
+}
+
+/* Current composer uses the same thread-variable system. Keep the bottom
+   container structurally full width and let its inner responsive wrapper use
+   the configured UltraWide width. */
+:root[${ATTR.enabled}="1"][${ATTR.wide}="1"]
+#thread-bottom-container{
+  --thread-content-responsive-max-width:var(--uwc-content-width)!important;
+  --thread-content-max-width:var(--uwc-content-width)!important;
+  --thread-body-max-width:calc(
+    var(--thread-content-max-width) +
+    (var(--thread-body-inline-padding,0px) * 2)
+  )!important;
+  width:100%!important;
+  max-width:none!important;
+  min-width:0!important;
+}
+
+:root[${ATTR.enabled}="1"][${ATTR.wide}="1"]
+#thread-bottom-container [class*="thread-content-max-width"],
+:root[${ATTR.enabled}="1"][${ATTR.wide}="1"]
+#thread-bottom-container [class*="thread-body-max-width"]{
+  --thread-content-responsive-max-width:var(--uwc-content-width)!important;
+  --thread-content-max-width:var(--uwc-content-width)!important;
+  --thread-body-max-width:calc(
+    var(--thread-content-max-width) +
+    (var(--thread-body-inline-padding,0px) * 2)
+  )!important;
+  width:var(--uwc-content-width)!important;
+  max-width:var(--thread-body-max-width)!important;
+  min-width:0!important;
+  margin-inline:auto!important;
+}
+
 :root[${ATTR.enabled}="1"][${ATTR.wide}="1"]
 [${ATTR.conversationRoot}="1"],
 :root[${ATTR.enabled}="1"][${ATTR.wide}="1"]
@@ -898,6 +1518,23 @@
   box-sizing:border-box!important;
 }
 
+:root[${ATTR.enabled}="1"][${ATTR.wide}="1"]
+[${ATTR.planNoticePath}="1"]{
+  width:100%!important;
+  max-width:none!important;
+  min-width:0!important;
+  box-sizing:border-box!important;
+}
+
+:root[${ATTR.enabled}="1"][${ATTR.wide}="1"]
+[${ATTR.planNotice}="1"]{
+  width:var(--uwc-content-width)!important;
+  max-width:var(--uwc-content-width)!important;
+  min-width:0!important;
+  margin-inline:auto!important;
+  box-sizing:border-box!important;
+}
+
 :root[${ATTR.enabled}="1"][${ATTR.wide}="1"][${ATTR.canvas}="1"]
 [${ATTR.turn}="1"],
 :root[${ATTR.enabled}="1"][${ATTR.wide}="1"][${ATTR.canvas}="1"]
@@ -922,6 +1559,46 @@
   text-align:left!important;
 }
 
+/* When the current virtualized transcript root is present, it owns the
+   configured width. Turn markers inside it must stay full-width so nested
+   percentages cannot compound and shrink the conversation. */
+:root[${ATTR.enabled}="1"][${ATTR.wide}="1"]
+[data-thread-user-message-navigation-content] [${ATTR.turn}="1"]{
+  width:100%!important;
+  max-width:none!important;
+  min-width:0!important;
+  margin-inline:0!important;
+}
+
+/* The current composer root is structural. Keep it full-width and let the
+   inner thread-variable wrapper carry the configured UltraWide width. */
+:root[${ATTR.enabled}="1"][${ATTR.wide}="1"]
+#thread-bottom-container[${ATTR.composer}="1"]{
+  width:100%!important;
+  max-width:none!important;
+  min-width:0!important;
+  margin-inline:0!important;
+}
+
+/* Current virtualized assistant/user message markers. */
+:root[${ATTR.enabled}="1"][${ATTR.wide}="1"]
+[data-markdown-text-style="assistant-message"]{
+  width:100%!important;
+  max-width:none!important;
+  min-width:0!important;
+  box-sizing:border-box!important;
+}
+
+:root[${ATTR.enabled}="1"][${ATTR.left}="1"]
+[data-markdown-text-style="assistant-message"]{
+  text-align:left!important;
+}
+
+:root[${ATTR.enabled}="1"][${ATTR.wide}="1"]
+[data-user-message-bubble="true"]{
+  max-width:min(var(--user-chat-width,80%),var(--uwc-content-width))!important;
+}
+
 ${safeMediaCss}
 
 @media (max-width:1099px), (max-height:559px){
@@ -942,32 +1619,45 @@ ${safeMediaCss}
   function buildUiCss() {
     return `
 #${ID.toast}{
+  --uwc-ui-bg:var(--main-surface-primary,Canvas);
+  --uwc-ui-text:var(--text-primary,CanvasText);
   position:fixed!important;
-  right:18px!important;
-  bottom:18px!important;
+  right:20px!important;
+  bottom:20px!important;
   z-index:2147483647!important;
-  max-width:min(460px,calc(100vw - 36px))!important;
-  padding:10px 13px!important;
-  border:1px solid color-mix(in srgb,CanvasText 18%,transparent)!important;
-  border-radius:12px!important;
-  background:Canvas!important;
-  color:CanvasText!important;
-  box-shadow:0 10px 32px rgba(0,0,0,.24)!important;
-  font:12px/1.4 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important;
+  max-width:min(420px,calc(100vw - 40px))!important;
+  padding:11px 14px!important;
+  border:1px solid var(--border-light,color-mix(in srgb,var(--uwc-ui-text) 12%,transparent))!important;
+  border-radius:14px!important;
+  background:var(--uwc-ui-bg)!important;
+  color:var(--uwc-ui-text)!important;
+  box-shadow:0 12px 34px rgba(0,0,0,.22)!important;
+  font:13px/1.4 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important;
   pointer-events:none!important;
+  backdrop-filter:blur(14px)!important;
 }
 
 #${ID.modal}{
+  --uwc-accent:#10a37f;
+  --uwc-danger:#ef4444;
+  --uwc-ui-bg:var(--main-surface-primary,Canvas);
+  --uwc-ui-bg-secondary:var(--main-surface-secondary,color-mix(in srgb,CanvasText 4%,Canvas));
+  --uwc-ui-bg-tertiary:var(--main-surface-tertiary,color-mix(in srgb,CanvasText 7%,Canvas));
+  --uwc-ui-text:var(--text-primary,CanvasText);
+  --uwc-ui-muted:var(--text-secondary,color-mix(in srgb,CanvasText 62%,transparent));
+  --uwc-ui-border:var(--border-light,color-mix(in srgb,CanvasText 12%,transparent));
+  --uwc-ui-border-strong:var(--border-medium,color-mix(in srgb,CanvasText 18%,transparent));
   position:fixed!important;
   inset:0!important;
   z-index:2147483646!important;
   display:flex!important;
   align-items:center!important;
   justify-content:center!important;
-  padding:18px!important;
-  background:rgba(0,0,0,.48)!important;
-  color:CanvasText!important;
-  font:13px/1.45 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important;
+  padding:24px!important;
+  background:rgba(0,0,0,.56)!important;
+  color:var(--uwc-ui-text)!important;
+  font:14px/1.45 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important;
+  backdrop-filter:blur(3px)!important;
 }
 
 #${ID.modal} *{
@@ -975,186 +1665,400 @@ ${safeMediaCss}
 }
 
 #${ID.modal} .uwc-panel{
-  width:min(780px,100%)!important;
-  max-height:min(88vh,880px)!important;
+  width:min(860px,100%)!important;
+  max-height:min(90vh,920px)!important;
   overflow:auto!important;
-  border:1px solid color-mix(in srgb,CanvasText 16%,transparent)!important;
+  overscroll-behavior:contain!important;
+  scrollbar-gutter:stable!important;
+  border:1px solid var(--uwc-ui-border)!important;
   border-radius:18px!important;
-  background:Canvas!important;
-  color:CanvasText!important;
-  box-shadow:0 22px 80px rgba(0,0,0,.4)!important;
+  background:var(--uwc-ui-bg)!important;
+  color:var(--uwc-ui-text)!important;
+  box-shadow:
+    0 24px 80px rgba(0,0,0,.38),
+    0 2px 10px rgba(0,0,0,.14)!important;
 }
 
 #${ID.modal} .uwc-header{
   position:sticky!important;
   top:0!important;
-  z-index:2!important;
+  z-index:3!important;
   display:flex!important;
-  align-items:flex-start!important;
+  align-items:center!important;
   justify-content:space-between!important;
-  gap:16px!important;
-  padding:18px!important;
-  border-bottom:1px solid color-mix(in srgb,CanvasText 12%,transparent)!important;
-  background:Canvas!important;
+  gap:18px!important;
+  padding:18px 20px!important;
+  border-bottom:1px solid var(--uwc-ui-border)!important;
+  background:color-mix(in srgb,var(--uwc-ui-bg) 94%,transparent)!important;
+  backdrop-filter:blur(18px)!important;
+}
+
+#${ID.modal} .uwc-header-copy{
+  min-width:0!important;
+}
+
+#${ID.modal} .uwc-title-row{
+  display:flex!important;
+  align-items:center!important;
+  flex-wrap:wrap!important;
+  gap:9px!important;
 }
 
 #${ID.modal} .uwc-title{
   margin:0!important;
   font-size:18px!important;
   line-height:1.25!important;
-  font-weight:700!important;
+  font-weight:650!important;
+  letter-spacing:-.015em!important;
+}
+
+#${ID.modal} .uwc-version{
+  display:inline-flex!important;
+  align-items:center!important;
+  min-height:22px!important;
+  padding:2px 8px!important;
+  border:1px solid var(--uwc-ui-border)!important;
+  border-radius:999px!important;
+  background:var(--uwc-ui-bg-secondary)!important;
+  color:var(--uwc-ui-muted)!important;
+  font:600 11px/1 ui-monospace,SFMono-Regular,Consolas,monospace!important;
 }
 
 #${ID.modal} .uwc-subtitle{
-  margin:5px 0 0!important;
-  opacity:.68!important;
+  margin:4px 0 0!important;
+  color:var(--uwc-ui-muted)!important;
   font-size:12px!important;
 }
 
 #${ID.modal} .uwc-close{
-  width:36px!important;
-  min-width:36px!important;
-  height:36px!important;
+  display:grid!important;
+  place-items:center!important;
+  width:34px!important;
+  min-width:34px!important;
+  height:34px!important;
   padding:0!important;
+  border-color:transparent!important;
+  border-radius:10px!important;
+  background:transparent!important;
+  color:var(--uwc-ui-muted)!important;
   font-size:20px!important;
+  font-weight:400!important;
+}
+
+#${ID.modal} .uwc-close:hover{
+  background:var(--uwc-ui-bg-secondary)!important;
+  color:var(--uwc-ui-text)!important;
 }
 
 #${ID.modal} .uwc-body{
-  padding:18px!important;
+  padding:18px 20px 0!important;
+}
+
+#${ID.modal} .uwc-status{
+  display:grid!important;
+  grid-template-columns:auto minmax(0,1fr)!important;
+  align-items:start!important;
+  column-gap:10px!important;
+  row-gap:2px!important;
+  margin:0 0 16px!important;
+  padding:13px 14px!important;
+  border:1px solid color-mix(in srgb,var(--uwc-accent) 28%,var(--uwc-ui-border))!important;
+  border-radius:14px!important;
+  background:color-mix(in srgb,var(--uwc-accent) 7%,var(--uwc-ui-bg))!important;
+  font-size:12px!important;
+}
+
+#${ID.modal} .uwc-status::before{
+  content:""!important;
+  width:8px!important;
+  height:8px!important;
+  margin-top:5px!important;
+  border-radius:999px!important;
+  background:var(--uwc-accent)!important;
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--uwc-accent) 14%,transparent)!important;
+}
+
+#${ID.modal} .uwc-status strong{
+  grid-column:2!important;
+  color:var(--uwc-ui-text)!important;
+  font-weight:650!important;
+}
+
+#${ID.modal} .uwc-status span{
+  grid-column:2!important;
+  color:var(--uwc-ui-muted)!important;
 }
 
 #${ID.modal} .uwc-section{
-  margin:0 0 16px!important;
-  padding:14px!important;
-  border:1px solid color-mix(in srgb,CanvasText 12%,transparent)!important;
+  margin:0 0 14px!important;
+  padding:15px!important;
+  border:1px solid var(--uwc-ui-border)!important;
   border-radius:14px!important;
+  background:var(--uwc-ui-bg-secondary)!important;
 }
 
 #${ID.modal} .uwc-section h3{
   margin:0 0 12px!important;
-  font-size:12px!important;
+  color:var(--uwc-ui-muted)!important;
+  font-size:11px!important;
+  line-height:1.2!important;
+  font-weight:650!important;
   text-transform:uppercase!important;
-  letter-spacing:.07em!important;
-  opacity:.68!important;
+  letter-spacing:.075em!important;
 }
 
 #${ID.modal} .uwc-grid{
   display:grid!important;
   grid-template-columns:repeat(2,minmax(0,1fr))!important;
-  gap:12px!important;
+  gap:9px!important;
 }
 
 #${ID.modal} .uwc-field{
   display:flex!important;
   flex-direction:column!important;
+  justify-content:center!important;
   gap:6px!important;
+  min-height:60px!important;
+  padding:10px 11px!important;
+  border:1px solid transparent!important;
+  border-radius:12px!important;
+  background:var(--uwc-ui-bg)!important;
+}
+
+#${ID.modal} .uwc-field:focus-within{
+  border-color:color-mix(in srgb,var(--uwc-accent) 48%,var(--uwc-ui-border))!important;
 }
 
 #${ID.modal} .uwc-check{
-  display:flex!important;
+  display:grid!important;
+  grid-template-columns:minmax(0,1fr) auto!important;
+  grid-template-areas:"copy toggle"!important;
   align-items:center!important;
-  gap:9px!important;
-  min-height:36px!important;
+  gap:12px!important;
+  min-height:60px!important;
+  padding:10px 11px!important;
+  border:1px solid transparent!important;
+  border-radius:12px!important;
+  background:var(--uwc-ui-bg)!important;
+  cursor:pointer!important;
+  transition:
+    background-color .14s ease,
+    border-color .14s ease!important;
+}
+
+#${ID.modal} .uwc-check:hover{
+  border-color:var(--uwc-ui-border)!important;
+  background:var(--uwc-ui-bg-tertiary)!important;
+}
+
+#${ID.modal} .uwc-check:has(input:focus-visible){
+  border-color:color-mix(in srgb,var(--uwc-accent) 65%,var(--uwc-ui-border))!important;
+  box-shadow:0 0 0 2px color-mix(in srgb,var(--uwc-accent) 18%,transparent)!important;
+}
+
+#${ID.modal} .uwc-check input[type="checkbox"]{
+  position:absolute!important;
+  width:1px!important;
+  min-width:1px!important;
+  height:1px!important;
+  min-height:1px!important;
+  margin:0!important;
+  padding:0!important;
+  opacity:0!important;
+  pointer-events:none!important;
+}
+
+#${ID.modal} .uwc-check-copy{
+  grid-area:copy!important;
+  min-width:0!important;
+  color:var(--uwc-ui-text)!important;
+  font-weight:500!important;
+}
+
+#${ID.modal} .uwc-toggle-state{
+  grid-area:toggle!important;
+  position:relative!important;
+  display:inline-flex!important;
+  align-items:center!important;
+  justify-content:flex-end!important;
+  width:38px!important;
+  min-width:38px!important;
+  height:22px!important;
+  padding:0!important;
+  overflow:hidden!important;
+  border:1px solid var(--uwc-ui-border-strong)!important;
+  border-radius:999px!important;
+  background:var(--uwc-ui-bg-tertiary)!important;
+  color:transparent!important;
+  font-size:0!important;
+  transition:
+    background-color .16s ease,
+    border-color .16s ease!important;
+}
+
+#${ID.modal} .uwc-toggle-state::after{
+  content:""!important;
+  position:absolute!important;
+  left:3px!important;
+  top:3px!important;
+  width:14px!important;
+  height:14px!important;
+  border-radius:999px!important;
+  background:var(--uwc-ui-muted)!important;
+  transition:
+    transform .16s ease,
+    background-color .16s ease!important;
+}
+
+#${ID.modal} .uwc-check input:checked ~ .uwc-toggle-state{
+  border-color:var(--uwc-accent)!important;
+  background:var(--uwc-accent)!important;
+}
+
+#${ID.modal} .uwc-check input:checked ~ .uwc-toggle-state::after{
+  transform:translateX(16px)!important;
+  background:#fff!important;
 }
 
 #${ID.modal} label{
-  font-weight:600!important;
+  font-weight:500!important;
 }
 
 #${ID.modal} .uwc-hint{
-  font-size:12px!important;
+  display:block!important;
+  margin-top:2px!important;
+  color:var(--uwc-ui-muted)!important;
+  font-size:11px!important;
+  line-height:1.35!important;
   font-weight:400!important;
-  opacity:.65!important;
 }
 
 #${ID.modal} input,
 #${ID.modal} select,
 #${ID.modal} textarea,
 #${ID.modal} button{
-  color:CanvasText!important;
-  background:Canvas!important;
-  border:1px solid color-mix(in srgb,CanvasText 18%,transparent)!important;
-  border-radius:10px!important;
-  font:13px/1.4 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important;
+  color:var(--uwc-ui-text)!important;
+  font:13px/1.4 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important;
 }
 
-#${ID.modal} input,
+#${ID.modal} input:not([type="checkbox"]),
 #${ID.modal} select,
 #${ID.modal} textarea{
   width:100%!important;
   min-height:36px!important;
-  padding:8px 10px!important;
+  padding:7px 10px!important;
+  border:1px solid var(--uwc-ui-border-strong)!important;
+  border-radius:9px!important;
+  outline:none!important;
+  background:var(--uwc-ui-bg)!important;
 }
 
-#${ID.modal} input[type="checkbox"]{
-  width:17px!important;
-  min-height:17px!important;
-  accent-color:CanvasText!important;
+#${ID.modal} select{
+  cursor:pointer!important;
+}
+
+#${ID.modal} input:not([type="checkbox"]):hover,
+#${ID.modal} select:hover,
+#${ID.modal} textarea:hover{
+  border-color:color-mix(in srgb,var(--uwc-ui-text) 25%,var(--uwc-ui-border))!important;
+}
+
+#${ID.modal} input:not([type="checkbox"]):focus,
+#${ID.modal} select:focus,
+#${ID.modal} textarea:focus{
+  border-color:var(--uwc-accent)!important;
+  box-shadow:0 0 0 2px color-mix(in srgb,var(--uwc-accent) 18%,transparent)!important;
 }
 
 #${ID.modal} button{
   min-height:36px!important;
-  padding:8px 12px!important;
+  padding:7px 12px!important;
+  border:1px solid var(--uwc-ui-border)!important;
+  border-radius:9px!important;
+  background:var(--uwc-ui-bg)!important;
   cursor:pointer!important;
-  font-weight:600!important;
+  font-weight:550!important;
+  transition:
+    background-color .14s ease,
+    border-color .14s ease,
+    transform .08s ease!important;
 }
 
 #${ID.modal} button:hover{
-  background:color-mix(in srgb,CanvasText 8%,Canvas)!important;
+  background:var(--uwc-ui-bg-tertiary)!important;
+  border-color:var(--uwc-ui-border-strong)!important;
+}
+
+#${ID.modal} button:active{
+  transform:scale(.985)!important;
 }
 
 #${ID.modal} button:focus-visible,
 #${ID.modal} input:focus-visible,
 #${ID.modal} select:focus-visible{
-  outline:2px solid CanvasText!important;
-  outline-offset:2px!important;
+  outline:none!important;
 }
 
 #${ID.modal} .uwc-primary{
-  background:CanvasText!important;
-  color:Canvas!important;
+  border-color:var(--uwc-accent)!important;
+  background:var(--uwc-accent)!important;
+  color:#fff!important;
+}
+
+#${ID.modal} .uwc-primary:hover{
+  border-color:color-mix(in srgb,var(--uwc-accent) 88%,#000)!important;
+  background:color-mix(in srgb,var(--uwc-accent) 88%,#000)!important;
 }
 
 #${ID.modal} .uwc-danger{
-  border-color:color-mix(in srgb,red 55%,CanvasText 12%)!important;
+  color:var(--uwc-danger)!important;
 }
 
-#${ID.modal} .uwc-actions{
-  display:flex!important;
-  flex-wrap:wrap!important;
-  justify-content:flex-end!important;
-  gap:8px!important;
-}
-
-
-#${ID.modal} .uwc-status{
-  display:flex!important;
-  flex-wrap:wrap!important;
-  gap:5px!important;
-  margin:0 0 16px!important;
-  padding:11px 13px!important;
-  border:1px solid color-mix(in srgb,CanvasText 12%,transparent)!important;
-  border-radius:12px!important;
-  background:color-mix(in srgb,CanvasText 5%,Canvas)!important;
-  font-size:12px!important;
-}
-
-#${ID.modal} .uwc-status span{
-  opacity:.68!important;
+#${ID.modal} .uwc-danger:hover{
+  border-color:color-mix(in srgb,var(--uwc-danger) 34%,var(--uwc-ui-border))!important;
+  background:color-mix(in srgb,var(--uwc-danger) 7%,var(--uwc-ui-bg))!important;
 }
 
 #${ID.modal} .uwc-shortcuts{
   display:grid!important;
   grid-template-columns:repeat(4,minmax(0,1fr))!important;
-  gap:8px!important;
+  gap:7px!important;
 }
 
 #${ID.modal} .uwc-shortcuts span{
+  display:flex!important;
+  align-items:center!important;
+  min-height:34px!important;
   padding:7px 9px!important;
-  border:1px solid color-mix(in srgb,CanvasText 10%,transparent)!important;
+  border:1px solid var(--uwc-ui-border)!important;
   border-radius:9px!important;
-  background:color-mix(in srgb,CanvasText 4%,Canvas)!important;
-  font:12px/1.3 ui-monospace,SFMono-Regular,Consolas,monospace!important;
+  background:var(--uwc-ui-bg)!important;
+  color:var(--uwc-ui-muted)!important;
+  font:11px/1.3 ui-monospace,SFMono-Regular,Consolas,monospace!important;
+}
+
+#${ID.modal} .uwc-actions{
+  position:sticky!important;
+  bottom:0!important;
+  z-index:3!important;
+  display:flex!important;
+  flex-wrap:wrap!important;
+  align-items:center!important;
+  justify-content:flex-end!important;
+  gap:8px!important;
+  margin:18px -20px 0!important;
+  padding:14px 20px!important;
+  border-top:1px solid var(--uwc-ui-border)!important;
+  background:color-mix(in srgb,var(--uwc-ui-bg) 94%,transparent)!important;
+  backdrop-filter:blur(18px)!important;
+}
+
+#${ID.modal} .uwc-actions::before{
+  content:"Changes are saved automatically and applied when settings are closed."!important;
+  margin-right:auto!important;
+  color:var(--uwc-ui-muted)!important;
+  font-size:11px!important;
+  line-height:1.35!important;
 }
 
 @media (max-width:700px){
@@ -1165,6 +2069,15 @@ ${safeMediaCss}
 
   #${ID.modal} .uwc-panel{
     max-height:100%!important;
+    border-radius:14px!important;
+  }
+
+  #${ID.modal} .uwc-header{
+    padding:15px!important;
+  }
+
+  #${ID.modal} .uwc-body{
+    padding:14px 15px 0!important;
   }
 
   #${ID.modal} .uwc-grid{
@@ -1173,6 +2086,25 @@ ${safeMediaCss}
 
   #${ID.modal} .uwc-shortcuts{
     grid-template-columns:repeat(2,minmax(0,1fr))!important;
+  }
+
+  #${ID.modal} .uwc-actions{
+    margin:16px -15px 0!important;
+    padding:12px 15px!important;
+  }
+
+  #${ID.modal} .uwc-actions::before{
+    flex-basis:100%!important;
+  }
+}
+
+@media (max-width:460px){
+  #${ID.modal} .uwc-shortcuts{
+    grid-template-columns:1fr!important;
+  }
+
+  #${ID.modal} .uwc-actions button{
+    flex:1 1 calc(50% - 4px)!important;
   }
 }
 
@@ -1286,7 +2218,8 @@ ${safeMediaCss}
     setBooleanAttribute(
       root,
       ATTR.wide,
-      isWideActive()
+      isWideActive() &&
+        !runtime.safeFallbackActive
     );
 
     setBooleanAttribute(
@@ -1492,6 +2425,22 @@ ${safeMediaCss}
     }
   }
 
+  function compactOutermostElements(elements, selector) {
+    const unique = Array.from(
+      new Set(
+        elements.filter(isConnectedElement)
+      )
+    );
+
+    return unique.filter((element) => {
+      try {
+        return !element.parentElement?.closest(selector);
+      } catch (_) {
+        return true;
+      }
+    });
+  }
+
   function queryConversationTurns() {
     let preferred = [];
 
@@ -1503,9 +2452,13 @@ ${safeMediaCss}
       ).filter(isConnectedElement);
     } catch (_) {}
 
+    runtime.lastRawTurnCount =
+      preferred.length;
+
     if (preferred.length > 0) {
-      return Array.from(
-        new Set(preferred)
+      return compactOutermostElements(
+        preferred,
+        SELECTOR.preferredTurns
       );
     }
 
@@ -1518,6 +2471,9 @@ ${safeMediaCss}
         )
       ).filter(isConnectedElement);
     } catch (_) {}
+
+    runtime.lastRawTurnCount =
+      fallbackMessages.length;
 
     const fallbackTurns =
       fallbackMessages
@@ -1728,22 +2684,6 @@ ${safeMediaCss}
       }
     };
 
-    const isVisible = (element) => {
-      try {
-        const rect = element.getBoundingClientRect();
-        const style = getComputedStyle(element);
-
-        return (
-          rect.width > 0 &&
-          rect.height > 0 &&
-          style.display !== 'none' &&
-          style.visibility !== 'hidden'
-        );
-      } catch (_) {
-        return true;
-      }
-    };
-
     const focused =
       document.activeElement;
 
@@ -1751,7 +2691,7 @@ ${safeMediaCss}
       isElement(focused) &&
       candidates.includes(focused) &&
       !isExcluded(focused) &&
-      isVisible(focused)
+      isVisibleElement(focused)
     ) {
       return focused;
     }
@@ -1759,18 +2699,30 @@ ${safeMediaCss}
     const scored = candidates
       .filter((element) =>
         !isExcluded(element) &&
-        isVisible(element)
+        isVisibleElement(element)
       )
       .map((element, index) => {
         let score = index;
 
         try {
+          if (element.id === 'prompt-textarea') {
+            score += 1600;
+          }
+
           if (
             element.matches(
-              '[data-testid="composer-input"],[data-testid="composer:input"]'
+              '[data-testid="prompt-textarea"],[data-testid="composer-input"],[data-testid="composer:input"]'
             )
           ) {
-            score += 1000;
+            score += 1200;
+          }
+
+          if (
+            element.closest(
+              '#thread-bottom-container'
+            )
+          ) {
+            score += 800;
           }
 
           if (
@@ -1884,32 +2836,430 @@ ${safeMediaCss}
     }
   }
 
-  function performScan() {
+  function hasFreePlanNoticeText(element) {
+    if (!isConnectedElement(element)) {
+      return false;
+    }
+
+    try {
+      const text = String(
+        element.textContent || ''
+      )
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+
+      if (
+        text.length < 8 ||
+        text.length > 360
+      ) {
+        return false;
+      }
+
+      return (
+        text.includes("you're on the free plan") ||
+        text.includes('you’re on the free plan') ||
+        text.includes('you are on the free plan') ||
+        text.includes("you're on free") ||
+        text.includes('you’re on free')
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function findPlanNoticeCandidate(main) {
+    const excludedSelector =
+      `${SELECTOR.preferredTurns},${SELECTOR.fallbackMessages},${SELECTOR.excludedComposerAncestor}`;
+
+    const chooseBest = (candidates) => {
+      const matches = candidates.filter((element) => {
+        if (
+          !isVisibleElement(element) ||
+          !hasFreePlanNoticeText(element)
+        ) {
+          return false;
+        }
+
+        try {
+          return !element.closest(excludedSelector);
+        } catch (_) {
+          return true;
+        }
+      });
+
+      matches.sort((a, b) => {
+        if (a !== b) {
+          if (a.contains(b)) {
+            return 1;
+          }
+
+          if (b.contains(a)) {
+            return -1;
+          }
+        }
+
+        const aLength = String(a.textContent || '').length;
+        const bLength = String(b.textContent || '').length;
+        return aLength - bLength;
+      });
+
+      return matches[0] || null;
+    };
+
+    try {
+      const semantic = Array.from(
+        main.querySelectorAll(
+          'aside,[role="status"],[role="note"],[aria-live],section'
+        )
+      );
+
+      runtime.lastPlanNoticeCandidateCount =
+        semantic.length;
+
+      const semanticMatch =
+        chooseBest(semantic);
+
+      if (semanticMatch) {
+        return semanticMatch;
+      }
+
+      const generic = Array.from(
+        main.querySelectorAll('div')
+      ).slice(-CONFIG.maxPlanNoticeCandidates);
+
+      runtime.lastPlanNoticeCandidateCount +=
+        generic.length;
+
+      return chooseBest(generic);
+    } catch (_) {
+      runtime.lastPlanNoticeCandidateCount = 0;
+      return null;
+    }
+  }
+
+  function markPlanNotice(desired) {
+    if (!isWideActive()) {
+      runtime.lastPlanNoticeCandidateCount = 0;
+      return;
+    }
+
+    const main = (() => {
+      try {
+        return Array.from(
+          document.querySelectorAll(
+            SELECTOR.main
+          )
+        ).find(isVisibleElement) || null;
+      } catch (_) {
+        return null;
+      }
+    })();
+
+    if (!main) {
+      runtime.lastPlanNoticeCandidateCount = 0;
+      return;
+    }
+
+    const notice =
+      findPlanNoticeCandidate(main);
+
+    if (!notice) {
+      return;
+    }
+
+    addDesiredMarker(
+      desired,
+      ATTR.planNotice,
+      notice
+    );
+
+    addPath(
+      desired,
+      notice.parentElement,
+      main,
+      ATTR.planNoticePath,
+      CONFIG.maxPlanNoticePathDepth
+    );
+  }
+
+  function pushDebugEvent(type, details = null) {
+    const event = {
+      at: Date.now(),
+      type: String(type || 'event')
+    };
+
+    if (details !== null && details !== undefined) {
+      event.details = details;
+    }
+
+    runtime.debugEvents.push(event);
+
+    if (runtime.debugEvents.length > CONFIG.debugEventLimit) {
+      runtime.debugEvents.splice(
+        0,
+        runtime.debugEvents.length - CONFIG.debugEventLimit
+      );
+    }
+  }
+
+  function seedDesiredMarkers(desired, dirtyRegions) {
+    const dirty = new Set(dirtyRegions);
+    const groups = [
+      [DIRTY.conversation, [
+        ATTR.conversationRoot,
+        ATTR.conversationPath,
+        ATTR.turn,
+        ATTR.turnPath
+      ]],
+      [DIRTY.composer, [
+        ATTR.composer,
+        ATTR.composerPath
+      ]],
+      [DIRTY.notice, [
+        ATTR.planNotice,
+        ATTR.planNoticePath
+      ]]
+    ];
+
+    for (const [region, attributes] of groups) {
+      if (dirty.has(region)) {
+        continue;
+      }
+
+      for (const attribute of attributes) {
+        const target = desired.get(attribute);
+        const previous = runtime.marked.get(attribute);
+
+        if (!target || !previous) {
+          continue;
+        }
+
+        for (const element of previous) {
+          if (isConnectedElement(element)) {
+            target.add(element);
+          }
+        }
+      }
+    }
+  }
+
+  function evaluateLayoutInvariants() {
+    const root = getRoot();
+    const pane = resolveActivePane();
+    const failures = [];
+
+    if (!runtime.started) {
+      failures.push('runtime-not-started');
+    }
+
+    if (settings.enabled) {
+      if (!document.getElementById(ID.style)) {
+        failures.push('main-style-missing');
+      }
+
+      if (root?.getAttribute(ATTR.enabled) !== '1') {
+        failures.push('root-enabled-state');
+      }
+    }
+
+    if (hasDisconnectedMarkers()) {
+      failures.push('disconnected-markers');
+    }
+
+    if (
+      runtime.lastTurnCount > 0 &&
+      !hasConnectedMarker(ATTR.turn)
+    ) {
+      failures.push('turn-markers-missing');
+    }
+
+    if (
+      settings.enabled &&
+      settings.widenComposer &&
+      document.querySelector(SELECTOR.composerInput) &&
+      !hasConnectedMarker(ATTR.composer)
+    ) {
+      failures.push('composer-marker-missing');
+    }
+
+    if (
+      settings.enabled &&
+      isWideActive() &&
+      !runtime.safeFallbackActive &&
+      pane &&
+      isVisibleElement(pane)
+    ) {
+      const paneRect = getVisibleRect(pane);
+      const maxAllowedWidth =
+        Math.max(0, Number(paneRect?.width || 0)) + 4;
+
+      const representatives = [
+        runtime.marked.get(ATTR.turn),
+        runtime.marked.get(ATTR.composer)
+      ];
+
+      for (const elements of representatives) {
+        const element = Array.from(elements || [])
+          .find(isVisibleElement);
+
+        if (!element || maxAllowedWidth <= 4) {
+          continue;
+        }
+
+        const rect = getVisibleRect(element);
+
+        if (
+          rect &&
+          rect.width > maxAllowedWidth
+        ) {
+          failures.push('managed-width-exceeds-pane');
+          break;
+        }
+      }
+    }
+
+    const result = {
+      ok: failures.length === 0,
+      failures,
+      checkedAt: Date.now()
+    };
+
+    runtime.lastInvariants = result;
+    return result;
+  }
+
+  function activateSafeFallback(reason) {
+    if (runtime.safeFallbackActive) {
+      return false;
+    }
+
+    runtime.safeFallbackActive = true;
+    runtime.safeFallbackReason = String(
+      reason || 'layout-invariant-failure'
+    );
+
+    setRootState();
+    pushDebugEvent('safe-fallback', {
+      reason: runtime.safeFallbackReason
+    });
+
+    console.warn(
+      '[UltraWide] Safe fallback activated:',
+      runtime.safeFallbackReason
+    );
+
+    return true;
+  }
+
+  function clearSafeFallback(reason = 'manual-reset') {
+    const wasActive = runtime.safeFallbackActive;
+
+    runtime.safeFallbackActive = false;
+    runtime.safeFallbackReason = '';
+    runtime.invariantFailureStreak = 0;
+    setRootState();
+
+    if (wasActive) {
+      pushDebugEvent('safe-fallback-cleared', {
+        reason
+      });
+    }
+
+    return wasActive;
+  }
+
+  function processInvariantResult(result) {
+    if (result.ok) {
+      runtime.invariantFailureStreak = 0;
+      return;
+    }
+
+    runtime.invariantFailureStreak += 1;
+    pushDebugEvent('invariant-failure', {
+      streak: runtime.invariantFailureStreak,
+      failures: result.failures
+    });
+
+    if (
+      runtime.invariantFailureStreak >=
+        CONFIG.invariantFailureThreshold
+    ) {
+      activateSafeFallback(
+        result.failures.join(',')
+      );
+    }
+  }
+
+  function performScan(
+    dirtyRegions = ALL_DIRTY_REGIONS,
+    reasons = ['scan']
+  ) {
     if (shouldPauseWork()) {
       runtime.deferredScan = true;
       return;
     }
 
+    const dirty = new Set(
+      dirtyRegions?.length
+        ? dirtyRegions
+        : ALL_DIRTY_REGIONS
+    );
+
     const startedAt = nowMs();
 
     runtime.lastScanAt = Date.now();
+    runtime.lastRepairAt = runtime.lastScanAt;
+    runtime.lastRepairReasons = [...reasons];
     runtime.lastError = null;
     runtime.deferredScan = false;
+    runtime.repairPassCount += 1;
+
+    pushDebugEvent('repair-pass', {
+      reasons: [...reasons],
+      dirty: [...dirty]
+    });
 
     try {
       const desired = createDesiredMarkers();
+      seedDesiredMarkers(desired, dirty);
 
-      detectCanvas();
-      markConversation(desired);
-      markComposer(desired);
+      if (dirty.has(DIRTY.split)) {
+        detectCanvas();
+      }
+
+      if (dirty.has(DIRTY.conversation)) {
+        markConversation(desired);
+      }
+
+      if (dirty.has(DIRTY.composer)) {
+        markComposer(desired);
+      }
+
+      if (dirty.has(DIRTY.notice)) {
+        markPlanNotice(desired);
+      }
 
       applyMarkerDiff(desired);
+      attachPaneResizeObserver();
+      detectDomCapabilities();
+      evaluateCompatibility(
+        runtime.lastCapabilities
+      );
       setRootState();
       runtime.scanCount += 1;
+
+      processInvariantResult(
+        evaluateLayoutInvariants()
+      );
     } catch (error) {
       runtime.lastError = String(
         error?.message || error
       );
+
+      pushDebugEvent('repair-error', {
+        message: runtime.lastError
+      });
 
       console.error(
         '[UltraWide] Layout scan failed:',
@@ -1917,63 +3267,89 @@ ${safeMediaCss}
       );
     } finally {
       if (settings.performanceTelemetry) {
-        runtime.lastScanDurationMs =
-          Math.max(0, nowMs() - startedAt);
+        const duration = Math.max(
+          0,
+          nowMs() - startedAt
+        );
+
+        runtime.lastScanDurationMs = duration;
+        runtime.totalScanDurationMs += duration;
+        runtime.maxScanDurationMs = Math.max(
+          runtime.maxScanDurationMs,
+          duration
+        );
+        runtime.measuredScanCount += 1;
       }
     }
   }
 
   function cancelScheduledScan() {
     if (runtime.scanTimer) {
-      clearTimeout(
-        runtime.scanTimer
-      );
-
+      clearTimeout(runtime.scanTimer);
       runtime.scanTimer = 0;
     }
 
     if (
       runtime.idleCallback &&
-      typeof cancelIdleCallback ===
-        'function'
+      typeof cancelIdleCallback === 'function'
     ) {
-      cancelIdleCallback(
-        runtime.idleCallback
-      );
-
+      cancelIdleCallback(runtime.idleCallback);
       runtime.idleCallback = 0;
     }
 
     if (runtime.animationFrame) {
-      cancelAnimationFrame(
-        runtime.animationFrame
-      );
-
+      cancelAnimationFrame(runtime.animationFrame);
       runtime.animationFrame = 0;
     }
   }
 
-  function scheduleScan(force = false) {
-    if (
-      !runtime.started &&
-      !force
-    ) {
-      return;
+  function requestRepair(
+    reason = 'repair',
+    dirtyRegions = ALL_DIRTY_REGIONS,
+    force = false
+  ) {
+    if (!runtime.started && !force) {
+      return false;
+    }
+
+    runtime.repairRequestCount += 1;
+    runtime.pendingRepairReasons.add(
+      String(reason || 'repair')
+    );
+
+    for (const region of dirtyRegions || []) {
+      if (ALL_DIRTY_REGIONS.includes(region)) {
+        runtime.pendingDirtyRegions.add(region);
+      }
+    }
+
+    if (runtime.pendingDirtyRegions.size === 0) {
+      ALL_DIRTY_REGIONS.forEach((region) =>
+        runtime.pendingDirtyRegions.add(region)
+      );
     }
 
     if (shouldPauseWork()) {
       runtime.deferredScan = true;
-      return;
+      pushDebugEvent('repair-deferred', {
+        reason
+      });
+      return false;
+    }
+
+    const alreadyScheduled = Boolean(
+      runtime.scanTimer ||
+      runtime.idleCallback ||
+      runtime.animationFrame
+    );
+
+    if (alreadyScheduled && !force) {
+      runtime.coalescedRepairCount += 1;
+      return true;
     }
 
     if (force) {
       cancelScheduledScan();
-    } else if (
-      runtime.scanTimer ||
-      runtime.idleCallback ||
-      runtime.animationFrame
-    ) {
-      return;
     }
 
     const run = () => {
@@ -1981,41 +3357,52 @@ ${safeMediaCss}
       runtime.idleCallback = 0;
       runtime.animationFrame = 0;
 
-      if (
-        runtime.started ||
-        force
-      ) {
-        performScan();
+      const reasons = [
+        ...runtime.pendingRepairReasons
+      ];
+
+      const dirty = [
+        ...runtime.pendingDirtyRegions
+      ];
+
+      runtime.pendingRepairReasons.clear();
+      runtime.pendingDirtyRegions.clear();
+
+      if (runtime.started || force) {
+        performScan(dirty, reasons);
       }
     };
 
     if (force) {
       runtime.animationFrame =
         requestAnimationFrame(run);
-
-      return;
+      return true;
     }
 
-    runtime.scanTimer =
-      window.setTimeout(() => {
-        runtime.scanTimer = 0;
+    runtime.scanTimer = window.setTimeout(() => {
+      runtime.scanTimer = 0;
 
-        if (
-          typeof requestIdleCallback ===
-          'function'
-        ) {
-          runtime.idleCallback =
-            requestIdleCallback(
-              run,
-              {
-                timeout:
-                  CONFIG.idleTimeoutMs
-              }
-            );
-        } else {
-          run();
-        }
-      }, settings.scanDebounceMs);
+      if (
+        typeof requestIdleCallback === 'function'
+      ) {
+        runtime.idleCallback =
+          requestIdleCallback(run, {
+            timeout: CONFIG.idleTimeoutMs
+          });
+      } else {
+        run();
+      }
+    }, settings.scanDebounceMs);
+
+    return true;
+  }
+
+  function scheduleScan(force = false) {
+    return requestRepair(
+      force ? 'forced-scan' : 'scan',
+      ALL_DIRTY_REGIONS,
+      force
+    );
   }
 
   function applyStyles() {
@@ -2036,8 +3423,13 @@ ${safeMediaCss}
       getMainCss()
     );
 
+    attachPaneResizeObserver();
     setRootState();
-    scheduleScan(true);
+    requestRepair(
+      'apply-styles',
+      ALL_DIRTY_REGIONS,
+      true
+    );
   }
 
   function showToast(message) {
@@ -2120,6 +3512,15 @@ ${safeMediaCss}
         runtime.canvasDetected
           ? 'yes'
           : 'no'
+      }`,
+      `pane ${
+        getAdaptiveWidth()
+      }px`,
+      `compat ${
+        (
+          runtime.lastCompatibility ||
+          evaluateCompatibility()
+        ).status
       }`,
       `cap ${settings.cap}`
     ].join(' | ');
@@ -2284,8 +3685,17 @@ ${safeMediaCss}
 
     runtime.href =
       location.href;
+    runtime.lastRouteChangeAt = Date.now();
+    clearSafeFallback('route-change');
+    pushDebugEvent('route-change', {
+      href: runtime.href
+    });
 
-    scheduleScan(true);
+    requestRepair(
+      'route-change',
+      ALL_DIRTY_REGIONS,
+      true
+    );
     return true;
   }
 
@@ -2396,31 +3806,29 @@ ${safeMediaCss}
     }
 
     try {
-      if (
-        node.matches(
-          SELECTOR.preferredTurns
-        ) ||
-        node.matches(
-          SELECTOR.fallbackMessages
-        ) ||
-        node.matches(
-          SELECTOR.composerInput
-        ) ||
-        node.matches(
-          SELECTOR.splitViewIndicators
-        )
-      ) {
+      if (node.matches(SCAN_TRIGGER_SELECTOR)) {
         return true;
       }
 
       return Boolean(
         node.querySelector(
-          [
-            SELECTOR.preferredTurns,
-            SELECTOR.fallbackMessages,
-            SELECTOR.composerInput,
-            SELECTOR.splitViewIndicators
-          ].join(',')
+          SCAN_TRIGGER_SELECTOR
+        )
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function isWithinManagedLayout(element) {
+    if (!isElement(element)) {
+      return false;
+    }
+
+    try {
+      return Boolean(
+        element.closest(
+          MANAGED_LAYOUT_SELECTOR
         )
       );
     } catch (_) {
@@ -2440,6 +3848,17 @@ ${safeMediaCss}
 
     for (let recordIndex = 0; recordIndex < recordLimit; recordIndex += 1) {
       const record = records[recordIndex];
+
+      if (
+        record.type === 'attributes' &&
+        (
+          nodeMayRequireScan(record.target) ||
+          isWithinManagedLayout(record.target)
+        )
+      ) {
+        return true;
+      }
+
       const added = record.addedNodes;
       const removed = record.removedNodes;
       const addedLimit = Math.min(
@@ -2474,11 +3893,125 @@ ${safeMediaCss}
     return records.length > CONFIG.maxMutationRecords;
   }
 
+  function classifyMutationDirtyRegions(records) {
+    const dirty = new Set();
+
+    if (!records || records.length === 0) {
+      return dirty;
+    }
+
+    const inspectNode = (node) => {
+      if (!isElement(node)) {
+        return;
+      }
+
+      try {
+        if (
+          node.matches(SELECTOR.preferredTurns) ||
+          node.matches(SELECTOR.fallbackMessages) ||
+          node.querySelector(SELECTOR.preferredTurns) ||
+          node.querySelector(SELECTOR.fallbackMessages)
+        ) {
+          dirty.add(DIRTY.conversation);
+        }
+
+        if (
+          node.matches(SELECTOR.composerInput) ||
+          node.matches(SELECTOR.composerShell) ||
+          node.querySelector(SELECTOR.composerInput) ||
+          node.querySelector(SELECTOR.composerShell)
+        ) {
+          dirty.add(DIRTY.composer);
+        }
+
+        if (
+          node.matches(SELECTOR.splitViewIndicators) ||
+          node.querySelector(SELECTOR.splitViewIndicators)
+        ) {
+          dirty.add(DIRTY.split);
+        }
+
+        if (
+          node.matches(SELECTOR.structuralRoots) ||
+          node.querySelector(SELECTOR.structuralRoots)
+        ) {
+          dirty.add(DIRTY.root);
+          dirty.add(DIRTY.conversation);
+          dirty.add(DIRTY.composer);
+        }
+      } catch (_) {}
+    };
+
+    const limit = Math.min(
+      records.length,
+      CONFIG.maxMutationRecords
+    );
+
+    for (let index = 0; index < limit; index += 1) {
+      const record = records[index];
+      inspectNode(record.target);
+
+      if (
+        record.type === 'childList' &&
+        isElement(record.target)
+      ) {
+        try {
+          if (record.target.closest(SELECTOR.main)) {
+            dirty.add(DIRTY.notice);
+          }
+        } catch (_) {}
+      }
+
+      const added = Array.from(record.addedNodes || [])
+        .slice(0, CONFIG.maxMutationNodes);
+      const removed = Array.from(record.removedNodes || [])
+        .slice(0, CONFIG.maxMutationNodes);
+
+      added.forEach(inspectNode);
+      removed.forEach(inspectNode);
+
+      if (
+        (record.addedNodes?.length || 0) > CONFIG.maxMutationNodes ||
+        (record.removedNodes?.length || 0) > CONFIG.maxMutationNodes
+      ) {
+        ALL_DIRTY_REGIONS.forEach((region) =>
+          dirty.add(region)
+        );
+      }
+    }
+
+    if (
+      records.length > CONFIG.maxMutationRecords
+    ) {
+      ALL_DIRTY_REGIONS.forEach((region) =>
+        dirty.add(region)
+      );
+    }
+
+    if (
+      dirty.size === 0 &&
+      mutationNeedsScan(records)
+    ) {
+      dirty.add(DIRTY.conversation);
+      dirty.add(DIRTY.composer);
+      dirty.add(DIRTY.notice);
+    }
+
+    return dirty;
+  }
+
   function onBodyMutations(records) {
     runtime.mutationBatchCount += 1;
+    runtime.lastMutationAt = Date.now();
 
-    if (mutationNeedsScan(records)) {
-      scheduleScan(false);
+    const dirty =
+      classifyMutationDirtyRegions(records);
+
+    if (dirty.size > 0) {
+      requestRepair(
+        'mutation',
+        [...dirty]
+      );
     }
   }
 
@@ -2505,7 +4038,11 @@ ${safeMediaCss}
         getMainCss()
       );
 
-      scheduleScan(true);
+      requestRepair(
+        'head-style-repair',
+        [DIRTY.root],
+        true
+      );
     }
   }
 
@@ -2551,7 +4088,10 @@ ${safeMediaCss}
         body,
         {
           childList: true,
-          subtree: true
+          subtree: true,
+          attributes: true,
+          attributeFilter:
+            CONFIG.mutationAttributeFilter
         }
       );
 
@@ -2590,7 +4130,11 @@ ${safeMediaCss}
         runtime.bootstrapObserver =
           null;
 
-        scheduleScan(true);
+        requestRepair(
+          'observer-bootstrap',
+          ALL_DIRTY_REGIONS,
+          true
+        );
       });
 
     runtime.bootstrapObserver.observe(
@@ -2618,6 +4162,8 @@ ${safeMediaCss}
 
     runtime.observedBody = null;
     runtime.observedHead = null;
+
+    disconnectPaneResizeObserver();
   }
 
   function repair() {
@@ -2626,6 +4172,7 @@ ${safeMediaCss}
     }
 
     attachObservers();
+    attachPaneResizeObserver();
 
     if (!settings.enabled) {
       removeMainStyle();
@@ -2634,13 +4181,15 @@ ${safeMediaCss}
       return;
     }
 
-    if (!document.getElementById(ID.style)) {
-      ensureStyle(ID.style, getMainCss());
-    }
+    ensureStyle(
+      ID.style,
+      getMainCss()
+    );
 
-    if (!document.getElementById(ID.uiStyle)) {
-      ensureStyle(ID.uiStyle, getUiCss());
-    }
+    ensureStyle(
+      ID.uiStyle,
+      getUiCss()
+    );
 
     checkRoute();
 
@@ -2657,14 +4206,34 @@ ${safeMediaCss}
       settings.widenComposer &&
       !hasConnectedMarker(ATTR.composer);
 
-    if (
-      hasDisconnectedMarkers() ||
-      conversationMissing ||
-      composerMissing
-    ) {
-      scheduleScan(false);
+    const dirty = [];
+
+    if (hasDisconnectedMarkers()) {
+      dirty.push(
+        DIRTY.conversation,
+        DIRTY.composer,
+        DIRTY.notice
+      );
     }
 
+    if (conversationMissing) {
+      dirty.push(DIRTY.conversation);
+    }
+
+    if (composerMissing) {
+      dirty.push(DIRTY.composer);
+    }
+
+    if (dirty.length > 0) {
+      requestRepair(
+        'periodic-repair',
+        [...new Set(dirty)]
+      );
+    }
+
+    processInvariantResult(
+      evaluateLayoutInvariants()
+    );
     setRootState();
   }
 
@@ -2819,8 +4388,14 @@ ${safeMediaCss}
   }
 
   function onEnvironmentChange() {
+    attachPaneResizeObserver();
+    measureEffectivePane();
     setRootState();
-    scheduleScan(false);
+    syncSettingsModal();
+    requestRepair(
+      'environment-change',
+      [DIRTY.split, DIRTY.root]
+    );
   }
 
   function bindEvents() {
@@ -2988,16 +4563,26 @@ ${safeMediaCss}
     }
   }
 
-  function menuStateLabel(
-    icon,
+  function menuToggleLabel(
     label,
     active,
     detail = ''
   ) {
-    const state =
-      active ? 'ON' : 'OFF';
+    const marker =
+      active ? '✓' : '○';
 
-    return `${icon} ${label}: ${state}${
+    return `${marker}  ${label}${
+      detail ? ` · ${detail}` : ''
+    }`;
+  }
+
+  function menuValueLabel(
+    icon,
+    label,
+    value,
+    detail = ''
+  ) {
+    return `${icon}  ${label} · ${value}${
       detail ? ` · ${detail}` : ''
     }`;
   }
@@ -3034,17 +4619,19 @@ ${safeMediaCss}
 
     registerMenu(
       'settings',
-      `⚙️ Open UltraWide settings · v${VERSION}`,
+      `⚙  Settings · v${VERSION}`,
       openSettings,
       's'
     );
 
     registerMenu(
       'enabled',
-      menuStateLabel(
-        '⏻',
+      menuToggleLabel(
         'Script',
+        settings.enabled,
         settings.enabled
+          ? 'enabled'
+          : 'disabled'
       ),
       () => {
         toggleSetting(
@@ -3057,8 +4644,7 @@ ${safeMediaCss}
 
     registerMenu(
       'wide',
-      menuStateLabel(
-        '↔',
+      menuToggleLabel(
         'UltraWide',
         settings.wide,
         isWideActive()
@@ -3076,8 +4662,7 @@ ${safeMediaCss}
 
     registerMenu(
       'left',
-      menuStateLabel(
-        '⇤',
+      menuToggleLabel(
         'Left alignment',
         settings.left
       ),
@@ -3092,22 +4677,24 @@ ${safeMediaCss}
 
     registerMenu(
       'cap',
-      `📏 Width cap: ${
+      menuValueLabel(
+        '⌗',
+        'Width cap',
         settings.cap === 'none'
-          ? 'No limit'
-          : `${settings.cap}px`
-      } · cycle`,
+          ? 'Unlimited'
+          : `${settings.cap}px`,
+        'cycle'
+      ),
       cycleCap,
       'm'
     );
 
     registerMenu(
       'auto',
-      menuStateLabel(
-        '⚡',
-        'Adaptive mode',
+      menuToggleLabel(
+        'Adaptive width',
         settings.auto,
-        `${settings.autoMinWidth}px minimum`
+        `≥ ${settings.autoMinWidth}px`
       ),
       () => {
         toggleSetting(
@@ -3120,8 +4707,7 @@ ${safeMediaCss}
 
     registerMenu(
       'composer',
-      menuStateLabel(
-        '✍',
+      menuToggleLabel(
         'Wide composer',
         settings.widenComposer
       ),
@@ -3135,13 +4721,12 @@ ${safeMediaCss}
 
     registerMenu(
       'canvas',
-      menuStateLabel(
-        '▣',
-        'Split-view safe mode',
+      menuToggleLabel(
+        'Split-view safety',
         settings.canvasSafeMode,
         runtime.canvasDetected
-          ? 'Canvas detected'
-          : 'no Canvas'
+          ? 'split view detected'
+          : 'standby'
       ),
       () => {
         toggleSetting(
@@ -3154,8 +4739,7 @@ ${safeMediaCss}
 
     registerMenu(
       'media',
-      menuStateLabel(
-        '▧',
+      menuToggleLabel(
         'Safe media',
         settings.safeMedia
       ),
@@ -3169,9 +4753,8 @@ ${safeMediaCss}
 
     registerMenu(
       'pause-hidden',
-      menuStateLabel(
-        '⏸',
-        'Pause in hidden tabs',
+      menuToggleLabel(
+        'Pause hidden tabs',
         settings.pauseWhenHidden,
         runtime.deferredScan
           ? 'scan deferred'
@@ -3187,11 +4770,10 @@ ${safeMediaCss}
 
     registerMenu(
       'telemetry',
-      menuStateLabel(
-        '◷',
+      menuToggleLabel(
         'Performance telemetry',
         settings.performanceTelemetry,
-        `${runtime.lastScanDurationMs.toFixed(1)} ms last scan`
+        `${runtime.lastScanDurationMs.toFixed(1)} ms`
       ),
       () => {
         toggleSetting(
@@ -3203,7 +4785,11 @@ ${safeMediaCss}
 
     registerMenu(
       'scan',
-      `🔄 Force layout scan · ${runtime.lastTurnCount} turns`,
+      menuValueLabel(
+        '↻',
+        'Rescan layout',
+        `${runtime.lastTurnCount} turns`
+      ),
       () => {
         scheduleScan(true);
         showToast(
@@ -3218,7 +4804,7 @@ ${safeMediaCss}
 
     registerMenu(
       'diagnostics',
-      '🩺 Copy diagnostics',
+      '⎘  Copy diagnostics',
       () => {
         void copyDiagnostics();
       }
@@ -3226,7 +4812,7 @@ ${safeMediaCss}
 
     registerMenu(
       'reset',
-      '♻ Reset all settings',
+      '↺  Reset to defaults',
       () => {
         if (
           window.confirm(
@@ -3347,7 +4933,10 @@ ${safeMediaCss}
         input,
         createElement(
           'span',
-          {},
+          {
+            className:
+              'uwc-check-copy'
+          },
           [
             label,
             hint
@@ -3361,6 +4950,19 @@ ${safeMediaCss}
                 )
               : null
           ]
+        ),
+        createElement(
+          'span',
+          {
+            className:
+              'uwc-toggle-state',
+            dataset: {
+              toggleStateFor: key
+            },
+            text:
+              input.checked ? 'ON' : 'OFF',
+            'aria-hidden': 'true'
+          }
         )
       ]
     );
@@ -3566,6 +5168,16 @@ ${safeMediaCss}
           ) {
             element.checked =
               Boolean(settings[key]);
+
+            const statePill =
+              modal.querySelector(
+                `[data-toggle-state-for="${key}"]`
+              );
+
+            if (statePill) {
+              statePill.textContent =
+                element.checked ? 'ON' : 'OFF';
+            }
           } else {
             element.value =
               String(settings[key]);
@@ -3605,8 +5217,116 @@ ${safeMediaCss}
     }
   }
 
-  function closeSettings() {
+  function getSettingsSnapshot() {
+    try {
+      return JSON.stringify(
+        normalizeSettings({ ...settings })
+      );
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function getReloadGuardState() {
+    try {
+      const raw = sessionStorage.getItem(
+        RELOAD_GUARD_KEY
+      );
+
+      const parsed = raw
+        ? JSON.parse(raw)
+        : null;
+
+      return parsed && typeof parsed === 'object'
+        ? parsed
+        : { timestamps: [] };
+    } catch (_) {
+      return { timestamps: [] };
+    }
+  }
+
+  function requestGuardedReload(reason) {
+    const now = Date.now();
+    const state = getReloadGuardState();
+    const timestamps = Array.isArray(state.timestamps)
+      ? state.timestamps.filter(
+          (timestamp) =>
+            now - Number(timestamp) <
+              CONFIG.reloadLoopWindowMs
+        )
+      : [];
+
+    if (
+      timestamps.length >=
+        CONFIG.reloadLoopMaxCount
+    ) {
+      pushDebugEvent('reload-suppressed', {
+        reason,
+        recentReloads: timestamps.length
+      });
+
+      showToast(
+        'Reload suppressed by loop protection'
+      );
+      return false;
+    }
+
+    timestamps.push(now);
+
+    try {
+      sessionStorage.setItem(
+        RELOAD_GUARD_KEY,
+        JSON.stringify({
+          timestamps,
+          reason: String(reason || 'reload')
+        })
+      );
+    } catch (_) {}
+
+    pushDebugEvent('reload-requested', {
+      reason
+    });
+
+    window.setTimeout(() => {
+      location.reload();
+    }, 0);
+
+    return true;
+  }
+
+  function closeSettings(options = {}) {
+    const reloadIfChanged =
+      options?.reloadIfChanged !== false;
+
+    const modal =
+      document.getElementById(ID.modal);
+
+    const openedSnapshot =
+      runtime.modalSettingsSnapshot;
+
+    const currentSnapshot =
+      getSettingsSnapshot();
+
+    const settingsChanged = Boolean(
+      modal &&
+      openedSnapshot &&
+      currentSnapshot &&
+      openedSnapshot !== currentSnapshot
+    );
+
     removeById(ID.modal);
+    runtime.modalSettingsSnapshot = '';
+
+    if (
+      reloadIfChanged &&
+      settingsChanged
+    ) {
+      requestGuardedReload(
+        'settings-changed'
+      );
+
+      return;
+    }
 
     const returnFocus =
       runtime.modalReturnFocus;
@@ -3680,6 +5400,9 @@ ${safeMediaCss}
         ? document.activeElement
         : null;
 
+    runtime.modalSettingsSnapshot =
+      getSettingsSnapshot();
+
     const modal =
       createElement(
         'div',
@@ -3707,18 +5430,39 @@ ${safeMediaCss}
                 [
                   createElement(
                     'div',
-                    {},
+                    {
+                      className:
+                        'uwc-header-copy'
+                    },
                     [
                       createElement(
-                        'h2',
+                        'div',
                         {
-                          id:
-                            'uwc-settings-title',
                           className:
-                            'uwc-title',
-                          text:
-                            'UltraWide ChatGPT'
-                        }
+                            'uwc-title-row'
+                        },
+                        [
+                          createElement(
+                            'h2',
+                            {
+                              id:
+                                'uwc-settings-title',
+                              className:
+                                'uwc-title',
+                              text:
+                                'UltraWide ChatGPT'
+                            }
+                          ),
+                          createElement(
+                            'span',
+                            {
+                              className:
+                                'uwc-version',
+                              text:
+                                `v${VERSION}`
+                            }
+                          )
+                        ]
                       ),
                       createElement(
                         'p',
@@ -3726,7 +5470,7 @@ ${safeMediaCss}
                           className:
                             'uwc-subtitle',
                           text:
-                            `Version ${VERSION} · Chat + Work adaptive layout`
+                            'Layout and runtime preferences'
                         }
                       )
                     ]
@@ -3791,7 +5535,7 @@ ${safeMediaCss}
                   ),
 
                   createSection(
-                    'UltraWide',
+                    'Layout',
                     [
                       createElement(
                         'div',
@@ -3823,11 +5567,11 @@ ${safeMediaCss}
                           ),
                           createCheckbox(
                             'canvasSafeMode',
-                            'Chat/Work split-view safe mode'
+                            'Split-view safe mode'
                           ),
                           createCheckbox(
                             'toast',
-                            'Show status messages'
+                            'Show status notifications'
                           )
                         ]
                       )
@@ -3835,7 +5579,7 @@ ${safeMediaCss}
                   ),
 
                   createSection(
-                    'Adaptive mode',
+                    'Adaptive behavior',
                     [
                       createElement(
                         'div',
@@ -3854,12 +5598,12 @@ ${safeMediaCss}
                           ),
                           createNumberInput(
                             'autoMinWidth',
-                            'Minimum viewport width',
+                            'Minimum pane width',
                             `${LIMITS.autoMinWidth[0]}–${LIMITS.autoMinWidth[1]} px`
                           ),
                           createNumberInput(
                             'disableBelowHeight',
-                            'Minimum viewport height',
+                            'Minimum window height',
                             '0 disables this condition'
                           )
                         ]
@@ -3942,7 +5686,7 @@ ${safeMediaCss}
                   ),
 
                   createSection(
-                    'Keyboard shortcuts',
+                    'Shortcuts',
                     [
                       createElement(
                         'div',
@@ -4024,7 +5768,7 @@ ${safeMediaCss}
                         {
                           type: 'button',
                           text:
-                            'Force layout scan',
+                            'Rescan layout',
                           onclick: () => {
                             scheduleScan(true);
 
@@ -4069,7 +5813,7 @@ ${safeMediaCss}
                           type: 'button',
                           className:
                             'uwc-primary',
-                          text: 'Close',
+                          text: 'Done',
                           onclick:
                             closeSettings
                         }
@@ -4165,11 +5909,64 @@ ${safeMediaCss}
     });
   }
 
+  function verifyRuntime() {
+    const mainStyle =
+      document.getElementById(ID.style);
+    const uiStyle =
+      document.getElementById(ID.uiStyle);
+    const root = getRoot();
+
+    const checks = {
+      started: runtime.started,
+      rootVersion:
+        !settings.enabled ||
+        root?.getAttribute(ATTR.version) === VERSION,
+      mainStyle:
+        !settings.enabled ||
+        mainStyle?.textContent === getMainCss(),
+      uiStyle:
+        uiStyle?.textContent === getUiCss(),
+      bodyObserver:
+        Boolean(runtime.bodyObserver),
+      headObserver:
+        Boolean(runtime.headObserver),
+      paneObserver:
+        typeof ResizeObserver !== 'function' ||
+        Boolean(runtime.paneResizeObserver) ||
+        !runtime.observedPane,
+      paneConnected:
+        !runtime.observedPane ||
+        runtime.observedPane.isConnected,
+      markersConnected:
+        !hasDisconnectedMarkers(),
+      rootEnabledState:
+        !settings.enabled ||
+        root?.getAttribute(ATTR.enabled) === '1',
+      schedulerState:
+        runtime.pendingRepairReasons instanceof Set &&
+        runtime.pendingDirtyRegions instanceof Set,
+      invariants:
+        runtime.safeFallbackActive ||
+        evaluateLayoutInvariants().ok
+    };
+
+    return {
+      ok: Object.values(checks).every(Boolean),
+      checks
+    };
+  }
+
   function getDiagnostics() {
+    const pane = measureEffectivePane();
+    const capabilities =
+      detectDomCapabilities();
+    const compatibility =
+      evaluateCompatibility(capabilities);
     const state = getState();
 
     return {
       generatedAt: new Date().toISOString(),
+      version: VERSION,
       userAgent: navigator.userAgent,
       viewport: {
         width: window.innerWidth || 0,
@@ -4177,10 +5974,57 @@ ${safeMediaCss}
         devicePixelRatio:
           window.devicePixelRatio || 1
       },
+      pane: {
+        width: pane.width,
+        height: pane.height,
+        source: pane.source,
+        observed:
+          Boolean(runtime.observedPane),
+        connected:
+          Boolean(
+            runtime.observedPane?.isConnected
+          ),
+        resizeObserverAttached:
+          Boolean(runtime.paneResizeObserver),
+        resizeCount:
+          runtime.paneResizeCount,
+        lastResizeAt:
+          runtime.lastPaneResizeAt
+      },
       document: {
         hidden: document.hidden,
         readyState: document.readyState,
-        url: location.href
+        url: location.href,
+        language:
+          document.documentElement?.lang || ''
+      },
+      capabilities: {
+        browser: {
+          navigationApi:
+            Boolean(window.navigation),
+          resizeObserver:
+            typeof ResizeObserver === 'function',
+          requestIdleCallback:
+            typeof requestIdleCallback === 'function',
+          gmStorage: hasGmStorage()
+        },
+        dom: capabilities
+      },
+      compatibility,
+      health: verifyRuntime(),
+      runtime: {
+        repairRequests: runtime.repairRequestCount,
+        repairPasses: runtime.repairPassCount,
+        coalescedRepairs: runtime.coalescedRepairCount,
+        lastRepairAt: runtime.lastRepairAt,
+        lastRepairReasons: runtime.lastRepairReasons,
+        pendingReasons: [...runtime.pendingRepairReasons],
+        pendingDirtyRegions: [...runtime.pendingDirtyRegions],
+        invariants: runtime.lastInvariants,
+        invariantFailureStreak: runtime.invariantFailureStreak,
+        safeFallbackActive: runtime.safeFallbackActive,
+        safeFallbackReason: runtime.safeFallbackReason,
+        debugEvents: [...runtime.debugEvents]
       },
       state
     };
@@ -4236,6 +6080,26 @@ ${safeMediaCss}
       left: settings.left,
       cap: settings.cap,
 
+      effectivePaneWidth:
+        getAdaptiveWidth(),
+      effectivePaneHeight:
+        runtime.effectivePaneHeight,
+      paneObserved:
+        Boolean(runtime.observedPane),
+      paneResizeObserverAttached:
+        Boolean(runtime.paneResizeObserver),
+      paneResizeCount:
+        runtime.paneResizeCount,
+      lastPaneResizeAt:
+        runtime.lastPaneResizeAt,
+
+      compatibility:
+        runtime.lastCompatibility ||
+        evaluateCompatibility(),
+      domCapabilities:
+        runtime.lastCapabilities ||
+        detectDomCapabilities(),
+
       auto: settings.auto,
       autoMinWidth:
         settings.autoMinWidth,
@@ -4260,16 +6124,59 @@ ${safeMediaCss}
 
       canvasDetected:
         runtime.canvasDetected,
+      transcriptRootDetected:
+        Boolean(document.querySelector('[data-thread-user-message-navigation-content]')),
+      conversationRootDetected:
+        Boolean(document.querySelector('[data-thread-find-target="conversation"]')),
+      composerRootDetected:
+        Boolean(document.querySelector('#thread-bottom-container')),
+      promptDetected:
+        Boolean(document.querySelector('#prompt-textarea,[data-testid="prompt-textarea"]')),
       detectedTurns:
         runtime.lastTurnCount,
+      rawTurnCandidates:
+        runtime.lastRawTurnCount,
+      planNoticeCandidates:
+        runtime.lastPlanNoticeCandidateCount,
       lastScanAt:
         runtime.lastScanAt,
       lastScanDurationMs:
         runtime.lastScanDurationMs,
+      averageScanDurationMs:
+        runtime.measuredScanCount > 0
+          ? runtime.totalScanDurationMs /
+            runtime.measuredScanCount
+          : 0,
+      maxScanDurationMs:
+        runtime.maxScanDurationMs,
+      measuredScanCount:
+        runtime.measuredScanCount,
       scanCount:
         runtime.scanCount,
+      repairRequestCount:
+        runtime.repairRequestCount,
+      repairPassCount:
+        runtime.repairPassCount,
+      coalescedRepairCount:
+        runtime.coalescedRepairCount,
+      lastRepairAt:
+        runtime.lastRepairAt,
+      lastRepairReasons:
+        [...runtime.lastRepairReasons],
+      invariantFailureStreak:
+        runtime.invariantFailureStreak,
+      invariants:
+        runtime.lastInvariants,
+      safeFallbackActive:
+        runtime.safeFallbackActive,
+      safeFallbackReason:
+        runtime.safeFallbackReason,
       mutationBatchCount:
         runtime.mutationBatchCount,
+      lastMutationAt:
+        runtime.lastMutationAt,
+      lastRouteChangeAt:
+        runtime.lastRouteChangeAt,
       deferredScan:
         runtime.deferredScan,
       pauseWhenHidden:
@@ -4336,9 +6243,16 @@ ${safeMediaCss}
     runtime.started = true;
     runtime.instanceStartedAt = Date.now();
     runtime.href = location.href;
+    runtime.safeFallbackActive = false;
+    runtime.safeFallbackReason = '';
+    runtime.invariantFailureStreak = 0;
+    pushDebugEvent('runtime-start', {
+      href: runtime.href
+    });
 
     installHistoryHooks();
     installObservers();
+    attachPaneResizeObserver();
     bindEvents();
     registerMenus();
     restartTimers();
@@ -4356,9 +6270,12 @@ ${safeMediaCss}
       return;
     }
 
+    pushDebugEvent('runtime-stop');
     runtime.started = false;
 
     cancelScheduledScan();
+    runtime.pendingRepairReasons.clear();
+    runtime.pendingDirtyRegions.clear();
 
     if (runtime.repairTimer) {
       clearInterval(
@@ -4400,7 +6317,9 @@ ${safeMediaCss}
     removeMainStyle();
     removeUiStyle();
     removeById(ID.toast);
-    closeSettings();
+    closeSettings({
+      reloadIfChanged: false
+    });
   }
 
   function restart() {
@@ -4415,7 +6334,6 @@ ${safeMediaCss}
 
       if (
         previous &&
-        previous.version !== VERSION &&
         typeof previous.stop === 'function'
       ) {
         try {
@@ -4444,6 +6362,24 @@ ${safeMediaCss}
             reset: resetSettings,
             state: getState,
             diagnostics: getDiagnostics,
+            capabilities: detectDomCapabilities,
+            verify: verifyRuntime,
+            invariants: evaluateLayoutInvariants,
+            debugEvents: () => [
+              ...runtime.debugEvents
+            ],
+            clearSafeFallback: () => {
+              const cleared =
+                clearSafeFallback('api');
+
+              requestRepair(
+                'safe-fallback-clear',
+                ALL_DIRTY_REGIONS,
+                true
+              );
+
+              return cleared;
+            },
             copyDiagnostics,
 
             caps: () => [
