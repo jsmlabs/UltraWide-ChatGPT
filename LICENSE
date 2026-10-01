@@ -1,21 +1,154 @@
-MIT License
+JSM Custom License v1.0
 
 Copyright (c) 2026 JSM
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+of this software and associated documentation files (the "Software"), to use,
+copy, modify, fork, integrate, and commercially use the Software, subject to
+the following terms and conditions:
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. Attribution
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+   The original copyright notice, this license, and appropriate attribution
+   to the original author must be retained in all copies, substantial portions,
+   forks, and redistributed versions of the Software.
+
+   Attribution may not be removed, obscured, falsified, or presented in a
+   misleading manner.
+
+2. Modifications
+
+   Modification of the Software is permitted.
+
+   Any redistributed modified version must clearly indicate that modifications
+   have been made and must not be represented as the original unmodified
+   Software.
+
+3. Redistribution
+
+   Redistribution of the Software, including modified versions, is permitted
+   provided that:
+
+   a. this license is included;
+   b. all copyright and attribution notices are preserved; and
+   c. the redistributed version does not falsely imply original authorship,
+      endorsement, sponsorship, partnership, certification, or official
+      affiliation.
+
+4. Commercial Use
+
+   Commercial use of the Software is permitted, including use as part of a
+   larger product, service, application, workflow, platform, infrastructure,
+   internal system, or commercial offering.
+
+   Commercial use does not waive or override any requirement of this license.
+
+5. No Standalone Resale
+
+   The Software, or any substantially unchanged, trivially modified,
+   repackaged, or primarily rebranded version of it, may not be sold,
+   sublicensed for a fee, or otherwise commercially distributed as a
+   standalone product where the primary commercial value is the Software
+   itself.
+
+   This restriction does not prohibit charging for a broader product, service,
+   platform, integration, implementation, customization, support offering, or
+   other commercial work in which the Software forms only part of the overall
+   value provided.
+
+6. No Misrepresentation or Deceptive Rebranding
+
+   You may not:
+
+   a. claim authorship of the original Software;
+   b. remove, conceal, or falsify its original attribution;
+   c. present a derivative work in a manner that falsely suggests that you
+      created the original Software; or
+   d. rebrand a substantially similar version primarily to conceal its origin.
+
+   Legitimate derivative works with meaningful modifications and preserved
+   attribution are permitted.
+
+7. Names, Logos, and Branding
+
+   This license does not grant permission to use the author's names,
+   usernames, organization names, project names, logos, trademarks, service
+   marks, or other branding except as reasonably necessary for factual
+   attribution.
+
+   Such identifiers may not be used in a manner that implies endorsement,
+   sponsorship, partnership, certification, or official affiliation without
+   prior written permission.
+
+8. Third-Party Rights
+
+   This license applies only to rights held by the copyright holder.
+
+   Any third-party software, libraries, assets, data, trademarks, patents, or
+   other materials included with or used by the Software remain subject to
+   their respective licenses, terms, and rights.
+
+9. Compliance With Law
+
+   You are responsible for ensuring that your use, modification,
+   redistribution, and commercial exploitation of the Software complies with
+   applicable law and relevant third-party obligations.
+
+10. Disclaimer of Warranty
+
+   THE SOFTWARE IS PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT WARRANTY OF
+   ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, ACCURACY,
+   RELIABILITY, AVAILABILITY, AND NONINFRINGEMENT.
+
+   THE COPYRIGHT HOLDER MAKES NO GUARANTEE THAT THE SOFTWARE WILL BE ERROR-FREE,
+   SECURE, UNINTERRUPTED, SUITABLE FOR ANY PARTICULAR PURPOSE, OR COMPATIBLE
+   WITH ANY PARTICULAR SYSTEM, SERVICE, OR ENVIRONMENT.
+
+11. Limitation of Liability
+
+   TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL THE
+   COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+   INCIDENTAL, SPECIAL, EXEMPLARY, CONSEQUENTIAL, OR OTHER DAMAGES, INCLUDING
+   BUT NOT LIMITED TO LOSS OF DATA, PROFITS, REVENUE, BUSINESS, OPPORTUNITY,
+   GOODWILL, OR SERVICE AVAILABILITY, ARISING FROM OR RELATED TO THE SOFTWARE
+   OR ITS USE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+
+12. Assumption of Risk
+
+   Use of the Software is at your own risk.
+
+   You are responsible for reviewing, testing, validating, securing, and
+   determining the suitability of the Software before relying on it in any
+   production, commercial, financial, safety-critical, privacy-sensitive, or
+   otherwise consequential environment.
+
+13. Termination
+
+   The rights granted under this license terminate automatically upon a
+   material violation of its terms.
+
+   Rights may be reinstated once the violation has been fully corrected,
+   unless the copyright holder has explicitly denied reinstatement in writing
+   due to repeated, intentional, or material non-compliance.
+
+14. No Waiver
+
+   Failure by the copyright holder to enforce any provision of this license
+   does not constitute a waiver of that provision or of the right to enforce
+   it later.
+
+15. Severability
+
+   If any provision of this license is found to be invalid, unlawful, or
+   unenforceable, that provision shall be limited or removed only to the
+   minimum extent necessary, and the remaining provisions shall continue in
+   full force and effect.
+
+16. Additional Permissions
+
+   Any use not permitted by this license requires prior written permission
+   from the copyright holder.
+
+   Additional permissions, exceptions, commercial arrangements, or alternative
+   licensing terms may be granted separately in writing.
