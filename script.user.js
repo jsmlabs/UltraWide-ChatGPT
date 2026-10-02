@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         UltraWide ChatGPT
+// @name         Wide ChatGPT
 // @namespace    https://www.instagram.com/jsm.ig/
 // @version      2026.10.01.12
 // @author       jsmdev
@@ -14,8 +14,8 @@
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
 // @grant        GM_unregisterMenuCommand
-// @downloadURL https://update.greasyfork.org/scripts/557270/UltraWide%20ChatGPT.user.js
-// @updateURL https://update.greasyfork.org/scripts/557270/UltraWide%20ChatGPT.meta.js
+// @downloadURL https://update.greasyfork.org/scripts/557270/Wide%20ChatGPT.user.js
+// @updateURL https://update.greasyfork.org/scripts/557270/Wide%20ChatGPT.meta.js
 // ==/UserScript==
 
 /*
