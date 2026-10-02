@@ -1,6 +1,6 @@
-## UltraWide ChatGPT
+## Wide ChatGPT
 
-UltraWide ChatGPT expands the usable conversation area on wide and ultrawide displays while preserving compatibility with the current ChatGPT interface.
+Wide ChatGPT expands the usable conversation area on wide and ultrawide displays while preserving compatibility with the current ChatGPT interface.
 
 It is designed to remain lightweight, adaptive, and resilient across normal conversations, Work, split views, Canvas/artifact-style layouts, code editors, responsive panes, and single-page navigation.
 
